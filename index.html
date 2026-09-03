@@ -2151,25 +2151,32 @@ function computeBalancesByType(){
   });
   return bal;
 }
+let loanFilterEmpId = 'all';
 function renderLoans(root){
+  const filterEmps = sortByName(activeEmployees());
   root.innerHTML = `
   <div class="section">
     <div class="section-head">
       <div><h3>Loans & Cash Advances</h3><div class="desc">Positive amount = loan/CA given. Negative amount = repayment/deduction applied.</div></div>
       <div class="flexrow no-print">
+        <select id="loanFilterSel" title="Show only this employee's loans & deductions">
+          <option value="all" ${loanFilterEmpId==='all'?'selected':''}>All Employees</option>
+          ${filterEmps.map(e=>`<option value="${e.id}" ${loanFilterEmpId===e.id?'selected':''}>${esc(e.name)}</option>`).join('')}
+        </select>
         <button class="btn" onclick="addInstallmentPlanModal()">+ Set Up Installment Plan</button>
         <button class="btn btn-primary" onclick="addLoanModal()">+ Add Entry</button>
       </div>
     </div>
     <div class="section-body"><div class="table-wrap" id="loanTableWrap"></div></div>
   </div>`;
+  document.getElementById('loanFilterSel').addEventListener('change', function(){ loanFilterEmpId = this.value; renderLoanTable(); });
   renderLoanTable();
 }
 function renderLoanTable(){
   const wrap = document.getElementById('loanTableWrap'); if(!wrap) return;
   const byType = computeBalancesByType();
-  const emps = sortByName(activeEmployees());
-  const list = [...state.loans].sort((a,b)=> new Date(b.date)-new Date(a.date));
+  const emps = sortByName(activeEmployees()).filter(e => loanFilterEmpId==='all' || e.id===loanFilterEmpId);
+  const list = [...state.loans].filter(l => loanFilterEmpId==='all' || l.employeeId===loanFilterEmpId).sort((a,b)=> new Date(b.date)-new Date(a.date));
   const balanceLines = emps.map(e=>{
     const t = byType[e.id];
     if(!t) return '';
@@ -2194,7 +2201,7 @@ function addLoanModal(){
   const emps = sortByName(activeEmployees());
   const body = `<div class="form-grid cols3">
     <div class="field"><label>Employee</label><select id="ln_emp">${emps.map(e=>`<option value="${e.id}">${esc(e.name)}</option>`).join('')}</select></div>
-    <div class="field"><label>Type</label><select id="ln_type"><option>Loan</option><option>Cash Advance</option><option>Repayment</option></select></div>
+    <div class="field"><label>Type</label><select id="ln_type"><option>Loan</option><option>Cash Advance</option><option>Pag-IBIG Loan</option><option>Repayment</option></select></div>
     <div class="field"><label>Date</label><input id="ln_date" type="date" value="${todayISO()}"></div>
     <div class="field" style="grid-column:1/-1;"><label>Remarks</label><input id="ln_remarks" placeholder="e.g. emergency loan"></div>
     <div class="field"><label>Amount (₱) — use negative for repayment</label><input id="ln_amount" type="number" step="0.01" value="0"></div>
@@ -2211,14 +2218,22 @@ function toggleLoanDeducted(id, val){ const l = state.loans.find(x=>x.id===id); 
 function updLoanRemarks(id, val){ const l = state.loans.find(x=>x.id===id); if(l){ l.remarks = val; markDirty(); } }
 function deleteLoan(id){ state.loans = state.loans.filter(x=>x.id!==id); markDirty(); renderLoanTable(); }
 
-// Steps from one payday to the next, alternating the 4th and the 19th of the month
-// (the company's two statutory-cutoff paydays), so an installment schedule lines up
-// with real payroll runs. A date in the first half of the month steps to the 19th of
-// the same month; a date in the second half steps to the 4th of the next month.
-function stepPayday(dateStr){
+// Steps from one payday to the next. Two frequencies:
+// - 'everyPayday' (default): alternates the 4th and the 19th of the month (the company's two
+//   statutory-cutoff paydays) — a date in the first half of the month steps to the 19th of the
+//   same month; a date in the second half steps to the 4th of the next month.
+// - 'monthly': always steps to the 4th of the next month, skipping the 19th entirely — this is
+//   how Pag-IBIG (and other government) loans are amortized: once a month, on the same cutoff
+//   SSS/PhilHealth/Pag-IBIG are already withheld on, not on every payday.
+function stepPayday(dateStr, freq){
   const d = new Date(dateStr + 'T00:00:00');
   const y = d.getFullYear(), m = d.getMonth(), day = d.getDate();
   const p2 = n => String(n).padStart(2,'0');
+  if(freq === 'monthly'){
+    const nm = (m===11) ? 0 : m+1;
+    const ny = (m===11) ? y+1 : y;
+    return `${ny}-${p2(nm+1)}-04`;
+  }
   if(day <= 11){
     return `${y}-${p2(m+1)}-19`;
   }
@@ -2226,7 +2241,7 @@ function stepPayday(dateStr){
   const ny = (m===11) ? y+1 : y;
   return `${ny}-${p2(nm+1)}-04`;
 }
-function computeInstallmentSchedule(total, installment, firstDate){
+function computeInstallmentSchedule(total, installment, firstDate, freq){
   total = num(total); installment = Math.abs(num(installment));
   if(total<=0 || installment<=0 || !firstDate) return [];
   const n = Math.ceil(total / installment);
@@ -2236,7 +2251,7 @@ function computeInstallmentSchedule(total, installment, firstDate){
     const amt = Math.round(Math.min(installment, remaining)*100)/100;
     out.push({ date:d, amount:amt });
     remaining -= amt;
-    d = stepPayday(d);
+    d = stepPayday(d, freq);
   }
   return out;
 }
@@ -2244,29 +2259,57 @@ function addInstallmentPlanModal(){
   const emps = sortByName(activeEmployees());
   const body = `<div class="form-grid cols3">
     <div class="field"><label>Employee</label><select id="ip_emp">${emps.map(e=>`<option value="${e.id}">${esc(e.name)}</option>`).join('')}</select></div>
-    <div class="field"><label>Type</label><select id="ip_type"><option>Cash Advance</option><option>Loan</option></select></div>
+    <div class="field"><label>Type</label><select id="ip_type" onchange="onInstallmentTypeChange()"><option>Cash Advance</option><option>Loan</option><option>Pag-IBIG Loan</option></select></div>
+    <div class="field"><label>Deduction Frequency</label><select id="ip_freq"><option value="everyPayday">Every Payday (4th &amp; 19th)</option><option value="monthly">Monthly Only (4th)</option></select></div>
     <div class="field"><label>Total Amount (₱)</label><input id="ip_total" type="number" step="0.01" value="0"></div>
+    <div class="field"><label>Loan Term (months) — optional</label><input id="ip_term" type="number" step="1" placeholder="e.g. 24" title="If set, auto-fills the deduction per payday below as Total ÷ Term. Leave blank to type the deduction amount yourself instead."></div>
     <div class="field"><label>Deduction per Payday (₱)</label><input id="ip_installment" type="number" step="0.01" value="0"></div>
     <div class="field"><label>First Deduction Payday</label><input id="ip_firstdate" type="date" value="${todayISO()}"></div>
-    <div class="field" style="grid-column:1/-1;"><label>Remarks</label><input id="ip_remarks" placeholder="e.g. emergency cash advance"></div>
+    <div class="field" style="grid-column:1/-1;"><label>Remarks</label><input id="ip_remarks" placeholder="e.g. Pag-IBIG multi-purpose loan"></div>
   </div>
-  <div class="helpbox" id="ip_preview" style="margin-top:10px;">Enter the total amount, deduction per payday, and first payday to preview the schedule.</div>`;
+  <div class="helpbox" id="ip_preview" style="margin-top:10px;">Enter the total amount, deduction per payday (or a loan term to auto-fill it), and first payday to preview the schedule.</div>`;
   const foot = `<button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="saveInstallmentPlan()">Create Plan</button>`;
   openModal("Set Up Cash Advance / Loan with Installments", body, foot);
-  ['ip_total','ip_installment','ip_firstdate'].forEach(id=>{
-    document.getElementById(id).addEventListener('input', updateInstallmentPreview);
-  });
+  document.getElementById('ip_total').addEventListener('input', onInstallmentTotalOrTermChange);
+  document.getElementById('ip_term').addEventListener('input', onInstallmentTotalOrTermChange);
+  document.getElementById('ip_installment').addEventListener('input', updateInstallmentPreview);
+  document.getElementById('ip_firstdate').addEventListener('input', updateInstallmentPreview);
+  document.getElementById('ip_freq').addEventListener('change', updateInstallmentPreview);
+}
+// Pag-IBIG loans are amortized monthly by default (since that's how the user's company actually
+// runs them) — picking this Type auto-switches Frequency to Monthly, but it stays editable in
+// case a specific loan really is meant to be split across both paydays instead.
+function onInstallmentTypeChange(){
+  const type = document.getElementById('ip_type').value;
+  if(type === 'Pag-IBIG Loan'){
+    document.getElementById('ip_freq').value = 'monthly';
+  }
+  updateInstallmentPreview();
+}
+// Convenience for term-based loans (e.g. "24-month Pag-IBIG loan"): once both Total and Term
+// are filled in, auto-computes the per-payday deduction so the admin doesn't have to do the
+// division themselves. Editing the Deduction field directly afterward is not overwritten unless
+// Total or Term changes again.
+function onInstallmentTotalOrTermChange(){
+  const total = num(document.getElementById('ip_total').value);
+  const term = num(document.getElementById('ip_term').value);
+  if(total>0 && term>0){
+    document.getElementById('ip_installment').value = (Math.round((total/term)*100)/100).toFixed(2);
+  }
+  updateInstallmentPreview();
 }
 function updateInstallmentPreview(){
   const total = num(document.getElementById('ip_total').value);
   const installment = num(document.getElementById('ip_installment').value);
   const firstDate = document.getElementById('ip_firstdate').value;
+  const freq = document.getElementById('ip_freq').value;
   const prev = document.getElementById('ip_preview');
   if(!prev) return;
-  const sched = computeInstallmentSchedule(total, installment, firstDate);
-  if(!sched.length){ prev.textContent = 'Enter the total amount, deduction per payday, and first payday to preview the schedule.'; return; }
+  const sched = computeInstallmentSchedule(total, installment, firstDate, freq);
+  if(!sched.length){ prev.textContent = 'Enter the total amount, deduction per payday (or a loan term to auto-fill it), and first payday to preview the schedule.'; return; }
   const last = sched[sched.length-1];
-  prev.innerHTML = `This will create <b>${sched.length}</b> deduction${sched.length===1?'':'s'} of ${peso(installment)} each (last one ${peso(last.amount)}), from ${fmtDate(sched[0].date)} to ${fmtDate(last.date)}.`;
+  const freqLabel = freq==='monthly' ? ' — once a month, on the 4th' : '';
+  prev.innerHTML = `This will create <b>${sched.length}</b> deduction${sched.length===1?'':'s'} of ${peso(installment)} each (last one ${peso(last.amount)}), from ${fmtDate(sched[0].date)} to ${fmtDate(last.date)}${freqLabel}.`;
 }
 function saveInstallmentPlan(){
   const empId = document.getElementById('ip_emp').value;
@@ -2274,11 +2317,12 @@ function saveInstallmentPlan(){
   const total = num(document.getElementById('ip_total').value);
   const installment = num(document.getElementById('ip_installment').value);
   const firstDate = document.getElementById('ip_firstdate').value;
+  const freq = document.getElementById('ip_freq').value;
   const remarks = document.getElementById('ip_remarks').value;
   if(total<=0){ alert("Enter the total amount."); return; }
-  if(installment<=0){ alert("Enter the deduction amount per payday."); return; }
+  if(installment<=0){ alert("Enter the deduction amount per payday (or fill in a loan term to auto-fill it)."); return; }
   if(!firstDate){ alert("Pick the first deduction payday."); return; }
-  const sched = computeInstallmentSchedule(total, installment, firstDate);
+  const sched = computeInstallmentSchedule(total, installment, firstDate, freq);
   state.loans.push({ id: uid('ln'), employeeId: empId, type, date: todayISO(),
     remarks: remarks || `${type} granted`, amount: total, deducted:true });
   sched.forEach((s,i)=>{
