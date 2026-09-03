@@ -867,6 +867,7 @@ function editEmployee(id){
     <div class="field"><label>Allowance per period (₱)</label><input id="f_allowance" type="number" step="0.01" value="${e.allowance||0}"></div>
     <div class="field"><label>Date Hired</label><input id="f_dateHired" type="date" value="${e.dateHired||''}"></div>
     <div class="field"><label>End Date (if separated)</label><input id="f_endDate" type="date" value="${e.endDate||''}"></div>
+    <div class="field"><label>Birthday</label><input id="f_birthday" type="date" value="${e.birthday||''}" title="Used for this employee's own Employee sign-in (name + birthday) to view their payslips"></div>
     <div class="field"><label>TIN</label><input id="f_tin" value="${esc(e.tin||'')}"></div>
     <div class="field"><label>SSS No.</label><input id="f_sssNo" value="${esc(e.sssNo||'')}"></div>
     <div class="field"><label>PhilHealth No.</label><input id="f_philhealthNo" value="${esc(e.philhealthNo||'')}"></div>
@@ -968,7 +969,7 @@ function saveEmployee(id, isNew){
   const rec = {
     id, name: get('f_name').trim(), empNo: get('f_empNo'), position: get('f_position'),
     department: get('f_department'), rateDay: num(get('f_rateDay')), allowance: num(get('f_allowance')),
-    dateHired: get('f_dateHired'), endDate: get('f_endDate'), tin: get('f_tin'), sssNo: get('f_sssNo'),
+    dateHired: get('f_dateHired'), endDate: get('f_endDate'), birthday: get('f_birthday'), tin: get('f_tin'), sssNo: get('f_sssNo'),
     philhealthNo: get('f_philhealthNo'), pagibigNo: get('f_pagibigNo'), paymentMethod: get('f_paymentMethod'),
     gcashNo: get('f_gcashNo'), bankAcct: get('f_paymentMethod')==='bank' ? get('f_gcashNo') : '',
     schedFrom: get('f_schedFrom') || '08:00', schedTo: get('f_schedTo') || '17:00',
