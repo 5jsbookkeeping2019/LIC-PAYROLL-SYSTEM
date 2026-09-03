@@ -1390,24 +1390,24 @@ function renderTimesheetModal(empId){
     const rowBg = isRestDay ? '#fff8e6' : (usingOverride ? '#eef6ff' : '#fff');
     return `<tr${isRestDay ? ' style="background:#fff8e6;"' : (usingOverride ? ' style="background:#eef6ff;"' : '')}>
       <td class="ts-date-freeze" style="background:${rowBg};">${fmtDate(day.date)}<br><span class="muted" style="font-size:10.5px;">${wk}${isRestDay ? ' · Rest Day' : ''}</span></td>
-      <td><input type="time" value="${day.schedFrom}" placeholder="${en.schedFrom}" title="Leave blank to use the period default (${en.schedFrom}). Set this only on days this person works a different shift." onchange="updTimesheetDay('${empId}',${idx},'schedFrom',this.value)"></td>
-      <td><input type="time" value="${day.schedTo}" placeholder="${en.schedTo}" title="Leave blank to use the period default (${en.schedTo}). Set this only on days this person works a different shift." onchange="updTimesheetDay('${empId}',${idx},'schedTo',this.value)"></td>
-      <td><input type="time" value="${day.timeIn}" onchange="updTimesheetDay('${empId}',${idx},'timeIn',this.value)"></td>
-      <td><input type="time" value="${day.lunchOut}" onchange="updTimesheetDay('${empId}',${idx},'lunchOut',this.value)"></td>
-      <td><input type="time" value="${day.lunchIn}" onchange="updTimesheetDay('${empId}',${idx},'lunchIn',this.value)"></td>
-      <td><input type="time" value="${day.timeOut}" onchange="updTimesheetDay('${empId}',${idx},'timeOut',this.value)"></td>
+      <td><input type="time" data-idx="${idx}" data-field="schedFrom" value="${day.schedFrom}" placeholder="${en.schedFrom}" title="Leave blank to use the period default (${en.schedFrom}). Set this only on days this person works a different shift." onchange="updTimesheetDay('${empId}',${idx},'schedFrom',this.value)"></td>
+      <td><input type="time" data-idx="${idx}" data-field="schedTo" value="${day.schedTo}" placeholder="${en.schedTo}" title="Leave blank to use the period default (${en.schedTo}). Set this only on days this person works a different shift." onchange="updTimesheetDay('${empId}',${idx},'schedTo',this.value)"></td>
+      <td><input type="time" data-idx="${idx}" data-field="timeIn" value="${day.timeIn}" onchange="updTimesheetDay('${empId}',${idx},'timeIn',this.value)"></td>
+      <td><input type="time" data-idx="${idx}" data-field="lunchOut" value="${day.lunchOut}" onchange="updTimesheetDay('${empId}',${idx},'lunchOut',this.value)"></td>
+      <td><input type="time" data-idx="${idx}" data-field="lunchIn" value="${day.lunchIn}" onchange="updTimesheetDay('${empId}',${idx},'lunchIn',this.value)"></td>
+      <td><input type="time" data-idx="${idx}" data-field="timeOut" value="${day.timeOut}" onchange="updTimesheetDay('${empId}',${idx},'timeOut',this.value)"></td>
       <td class="num">${isRestDay ? '—' : hoursWorked.toFixed(2)}</td>
       <td class="num">${isRestDay ? '—' : lateMinutes.toFixed(0)}</td>
       <td class="num" title="${lateMinutes>0 ? 'Voided — he was late this day' : ''}">${isRestDay ? '—' : otHours.toFixed(2)}</td>
       <td class="num" title="${isRestDay ? 'Saturday/Sunday work — counted as Rest Day, not regular hours' : ''}">${isRestDay ? hoursWorked.toFixed(2) : '—'}</td>
-      <td><input type="text" value="${esc(day.remarks)}" placeholder="e.g. Rest Day"  onchange="updTimesheetDay('${empId}',${idx},'remarks',this.value)"></td>
+      <td><input type="text" data-idx="${idx}" data-field="remarks" value="${esc(day.remarks)}" placeholder="e.g. Rest Day"  onchange="updTimesheetDay('${empId}',${idx},'remarks',this.value)"></td>
     </tr>`;
   }).join('');
   const body = `
     <div class="form-grid cols3" style="margin-bottom:14px;">
       <div class="field"><label>Employee</label><input value="${esc(emp.name)}" disabled></div>
-      <div class="field"><label>Work Schedule From (period default)</label><input type="time" value="${en.schedFrom}" onchange="updTimesheetSched('${empId}','schedFrom',this.value)"></div>
-      <div class="field"><label>Work Schedule To (period default)</label><input type="time" value="${en.schedTo}" onchange="updTimesheetSched('${empId}','schedTo',this.value)"></div>
+      <div class="field"><label>Work Schedule From (period default)</label><input type="time" data-field="schedFromDefault" value="${en.schedFrom}" onchange="updTimesheetSched('${empId}','schedFrom',this.value)"></div>
+      <div class="field"><label>Work Schedule To (period default)</label><input type="time" data-field="schedToDefault" value="${en.schedTo}" onchange="updTimesheetSched('${empId}','schedTo',this.value)"></div>
     </div>
     <div class="helpbox">Hours Worked, Late, and OT are all computed automatically from Time In / Time Out vs. the Work Schedule. OT past the Schedule To time only counts once at least a full hour has actually been rendered (under 60 minutes earns 0), then rounds to the nearest 30-minute block, and is voided to 0 entirely on any day he clocked in late — staying late doesn't earn OT if he starts late that day. Clocking in early only earns OT in full whole hours (1 hour, 2 hours, 3 hours...) — any leftover minutes that don't complete another full hour are dropped, and anything under a full hour early counts toward neither OT nor Hours Worked at all. Any day worked that falls on a Saturday or Sunday (highlighted below) is counted entirely as Rest Day hours instead — it's kept out of regular Hours Worked/Late/OT and paid at the Rest Day rate instead. If someone works a different shift on specific days (e.g. 1:00 PM–10:00 PM instead of their usual schedule), set that day's Sched In/Out columns (highlighted blue below) — leave them blank on every other day to keep using the period default above. This is saved with the payroll run, but only affects pay once you click "Apply Totals to Payroll Entry" below (and OT still isn't actually paid until the "OT Form?" box is checked on the payroll entry).</div>
     <div class="table-wrap">
@@ -1425,13 +1425,40 @@ function renderTimesheetModal(empId){
     <button class="btn btn-primary" onclick="applyTimesheetToEntry('${empId}')">Apply Totals to Payroll Entry</button>`;
   openModal(`🕐 Time Sheet — ${esc(emp.name)}`, body, foot, {wide:true});
 }
+// Re-rendering the Time Sheet modal (needed so Hours Worked/Late/OT recompute live as you type)
+// replaces the ENTIRE modal body's HTML, including the scrollable table. Left unguarded, that
+// wipes the table's scroll position and steals focus off whatever field you were typing into —
+// on every single edit — which is what made it look like your typing kept "disappearing"
+// (nawawawala). This wrapper remembers where you were (scroll position + which exact cell/field
+// had focus) before re-rendering, then restores both right after, so editing one field doesn't
+// throw you back to the top of the table or knock you out of the input.
+function rerenderTimesheetPreservingFocus(empId){
+  const modalBody = document.querySelector('#modalBox .modal-body');
+  const tableWrap = modalBody ? modalBody.querySelector('.table-wrap') : null;
+  const scrollTop = tableWrap ? tableWrap.scrollTop : 0;
+  const active = document.activeElement;
+  let focusInfo = null;
+  if(active && modalBody && modalBody.contains(active) && active.dataset && active.dataset.field){
+    focusInfo = { idx: active.dataset.idx, field: active.dataset.field };
+  }
+  renderTimesheetModal(empId);
+  const newTableWrap = document.querySelector('#modalBox .modal-body .table-wrap');
+  if(newTableWrap) newTableWrap.scrollTop = scrollTop;
+  if(focusInfo){
+    const sel = (focusInfo.idx!==undefined && focusInfo.idx!==null && focusInfo.idx!=='')
+      ? `[data-idx="${focusInfo.idx}"][data-field="${focusInfo.field}"]`
+      : `[data-field="${focusInfo.field}"]`;
+    const newEl = document.querySelector(sel);
+    if(newEl) newEl.focus();
+  }
+}
 function updTimesheetDay(empId, idx, field, value){
   const run = state.runs.find(r=>r.id===currentRunId);
   const en = run && run.entries.find(e=>e.employeeId===empId);
   if(!en || !en.timesheet[idx]) return;
   en.timesheet[idx][field] = (field==='otHours') ? num(value) : value;
   markDirty();
-  renderTimesheetModal(empId);
+  rerenderTimesheetPreservingFocus(empId);
 }
 function updTimesheetSched(empId, field, value){
   const run = state.runs.find(r=>r.id===currentRunId);
@@ -1439,7 +1466,7 @@ function updTimesheetSched(empId, field, value){
   if(!en) return;
   en[field] = value;
   markDirty();
-  renderTimesheetModal(empId);
+  rerenderTimesheetPreservingFocus(empId);
 }
 function applyTimesheetToEntry(empId){
   const run = state.runs.find(r=>r.id===currentRunId);
