@@ -1812,14 +1812,16 @@ function stepPayslip(dir){
 // since only the log preserves the type breakdown.
 function computeYTDForEmployee(empId, asOfDate){
   const year = new Date(asOfDate).getFullYear();
-  let payrollTotal = 0, totalIncome = 0;
+  // Total Income for the year = gross earnings from every payroll run entry (this is whatever
+  // Total Earnings already comes out to per calcEntry — deductions are NOT netted out here, so
+  // this is not take-home).
+  let totalIncome = 0;
   state.runs.forEach(r=>{
     if(new Date(r.periodEnd).getFullYear() !== year) return;
     if(new Date(r.periodEnd) > new Date(asOfDate)) return;
     const en = r.entries.find(e=>e.employeeId===empId);
     if(!en) return;
     const c = calcEntry(empById(empId), en, r);
-    payrollTotal += c.takeHome;
     totalIncome += c.totalEarnings;
   });
   let licCommission = 0, fivejsCommission = 0;
@@ -1832,6 +1834,11 @@ function computeYTDForEmployee(empId, asOfDate){
     if(t === 'LIC') licCommission += num(cm.amount);
     else if(t === '5JS') fivejsCommission += num(cm.amount);
   });
+  // Pure LIC Payroll salary = Total Income minus both commission types — i.e. back out the
+  // LIC/5JS commission (from the Commission Log) that's bundled into Total Income, leaving just
+  // straight payroll salary. By construction, payrollTotal + licCommission + fivejsCommission
+  // always equals totalIncome back out.
+  const payrollTotal = totalIncome - licCommission - fivejsCommission;
   return { year, payrollTotal, totalIncome, licCommission, fivejsCommission };
 }
 
@@ -2382,7 +2389,7 @@ function renderYtdReport(root){
   const years = Array.from(new Set(state.runs.map(r=>new Date(r.periodEnd).getFullYear()))).sort((a,b)=>b-a);
   const year = years[0] || new Date().getFullYear();
   root.innerHTML = `<div class="section"><div class="section-head">
-    <div><h3>Year-to-Date Summary</h3><div class="desc">Total earnings, deductions, take-home pay, and commission (LIC / 5JS) per employee, from the Commission Log.</div></div>
+    <div><h3>Year-to-Date Summary</h3><div class="desc">YTD Payroll is pure LIC salary (Total Income minus LIC and 5JS Commission). Total Income is Payroll + LIC Commission + 5JS Commission combined.</div></div>
     <div class="flexrow no-print"><select id="ytd_year">${(years.length?years:[year]).map(y=>`<option value="${y}">${y}</option>`).join('')}</select></div>
   </div><div class="section-body"><div id="ytdWrap" class="table-wrap"></div></div></div>`;
   const sel = document.getElementById('ytd_year');
@@ -2415,11 +2422,15 @@ function renderYtdTable(){
     if(type === 'LIC') t.licCommission += num(cm.amount);
     else if(type === '5JS') t.fivejsCommission += num(cm.amount);
   });
-  const rows = Object.values(totals).sort((a,b)=>b.takeHome-a.takeHome);
-  const grand = rows.reduce((a,r)=>({earnings:a.earnings+r.earnings, deductions:a.deductions+r.deductions, takeHome:a.takeHome+r.takeHome, licCommission:a.licCommission+r.licCommission, fivejsCommission:a.fivejsCommission+r.fivejsCommission}), {earnings:0,deductions:0,takeHome:0,licCommission:0,fivejsCommission:0});
-  wrap.innerHTML = `<table><thead><tr><th>Employee</th><th class="num">Total Earnings</th><th class="num">Total Deductions</th><th class="num">Total Take-Home</th><th class="num">LIC Commission</th><th class="num">5JS Commission</th></tr></thead><tbody>
-  ${rows.map(r=>`<tr><td>${esc(r.name)}</td><td class="num">${peso(r.earnings)}</td><td class="num">${peso(r.deductions)}</td><td class="num" style="font-weight:700;">${peso(r.takeHome)}</td><td class="num">${peso(r.licCommission)}</td><td class="num">${peso(r.fivejsCommission)}</td></tr>`).join('')}
-  </tbody><tfoot><tr style="font-weight:700;background:#fafbfc;"><td>GRAND TOTAL</td><td class="num">${peso(grand.earnings)}</td><td class="num">${peso(grand.deductions)}</td><td class="num">${peso(grand.takeHome)}</td><td class="num">${peso(grand.licCommission)}</td><td class="num">${peso(grand.fivejsCommission)}</td></tr></tfoot></table>
+  // Total Income (r.earnings, from Total Earnings across the year's runs) already includes any
+  // commission bundled into payroll entries. YTD Payroll backs the LIC/5JS Commission Log totals
+  // out of that, leaving pure LIC salary — mirroring the same YTD Payroll / Total Income figures
+  // shown on each employee's payslip (see computeYTDForEmployee).
+  const rows = Object.values(totals).map(r => ({...r, payroll: r.earnings - r.licCommission - r.fivejsCommission})).sort((a,b)=>b.takeHome-a.takeHome);
+  const grand = rows.reduce((a,r)=>({earnings:a.earnings+r.earnings, payroll:a.payroll+r.payroll, deductions:a.deductions+r.deductions, takeHome:a.takeHome+r.takeHome, licCommission:a.licCommission+r.licCommission, fivejsCommission:a.fivejsCommission+r.fivejsCommission}), {earnings:0,payroll:0,deductions:0,takeHome:0,licCommission:0,fivejsCommission:0});
+  wrap.innerHTML = `<table><thead><tr><th>Employee</th><th class="num">YTD Payroll</th><th class="num">LIC Commission</th><th class="num">5JS Commission</th><th class="num">Total Income</th><th class="num">Total Deductions</th><th class="num">Total Take-Home</th></tr></thead><tbody>
+  ${rows.map(r=>`<tr><td>${esc(r.name)}</td><td class="num">${peso(r.payroll)}</td><td class="num">${peso(r.licCommission)}</td><td class="num">${peso(r.fivejsCommission)}</td><td class="num" style="font-weight:700;">${peso(r.earnings)}</td><td class="num">${peso(r.deductions)}</td><td class="num">${peso(r.takeHome)}</td></tr>`).join('')}
+  </tbody><tfoot><tr style="font-weight:700;background:#fafbfc;"><td>GRAND TOTAL</td><td class="num">${peso(grand.payroll)}</td><td class="num">${peso(grand.licCommission)}</td><td class="num">${peso(grand.fivejsCommission)}</td><td class="num">${peso(grand.earnings)}</td><td class="num">${peso(grand.deductions)}</td><td class="num">${peso(grand.takeHome)}</td></tr></tfoot></table>
   ${rows.length===0?'<div class="empty-state">No payroll or commission data for this year yet.</div>':''}`;
 }
 function renderRunSummaryReport(root){
