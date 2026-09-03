@@ -607,7 +607,12 @@ function calcEntry(emp, entry, run){
   const holidayDays = num(entry.holidayDays);
   const commission = num(entry.commission);
   const thirteenthMonth = num(entry.thirteenthMonth);
-  const incentiveLeavePay = num(entry.incentiveLeavePay);
+  // Incentive Leave Pay auto-computes from days × daily rate (same pattern as Holiday Pay below).
+  // Legacy runs recorded before this feature only have a manually-entered incentiveLeavePay peso
+  // amount with no day count — those historical figures are preserved as-is (never recomputed to
+  // 0) by falling back to the stored value whenever incentiveLeaveDays isn't set.
+  const incentiveLeaveDays = num(entry.incentiveLeaveDays);
+  const incentiveLeavePay = incentiveLeaveDays > 0 ? incentiveLeaveDays * rateDay : num(entry.incentiveLeavePay);
   const allowance = computeAllowance(emp, entry, run);
   const adjustment = num(entry.adjustment);
 
@@ -633,7 +638,7 @@ function calcEntry(emp, entry, run){
   const totalDeductions = sss + philhealth + pagibig + lateDeduction + loanDeduction + cashAdvanceDeduction + otherDeduction;
   const takeHome = totalEarnings - totalDeductions;
 
-  return { hourlyRate:hr, basicSalary, restDayPay, otPay, otApproved, holidayPay, allowance, totalEarnings,
+  return { hourlyRate:hr, basicSalary, restDayPay, otPay, otApproved, holidayPay, incentiveLeaveDays, incentiveLeavePay, allowance, totalEarnings,
     lateDeduction, sss, philhealth, pagibig, loanDeduction, cashAdvanceDeduction, otherDeduction,
     totalDeductions, takeHome };
 }
@@ -1093,7 +1098,7 @@ function createRun(){
     const prev = lastEntryForEmployee(emp.id);
     run.entries.push({
       employeeId: emp.id, hoursWorked:0, lateMinutes:0, otHours:0, restDayHours:0, holidayDays:0,
-      commission:0, thirteenthMonth:0, incentiveLeavePay:0, allowanceOverride:"", adjustment:0,
+      commission:0, thirteenthMonth:0, incentiveLeaveDays:0, incentiveLeavePay:0, allowanceOverride:"", adjustment:0,
       applyStatutory: isLastCutoff,
       sss: prev ? num(prev.sss) : 0, philhealth: prev ? num(prev.philhealth) : philhealthCompute(emp.rateDay*22),
       pagibig: prev ? num(prev.pagibig) : pagibigCompute(emp.rateDay*22),
@@ -1162,7 +1167,7 @@ function renderRunDetail(){
       <td><input type="number" step="1" value="${en.holidayDays}" onchange="updEntry('${emp.id}','holidayDays',this.value)"></td>
       <td><input type="number" step="0.01" value="${en.commission}" onchange="updEntry('${emp.id}','commission',this.value)"></td>
       <td><input type="number" step="0.01" value="${en.thirteenthMonth}" onchange="updEntry('${emp.id}','thirteenthMonth',this.value)"></td>
-      <td><input type="number" step="0.01" value="${en.incentiveLeavePay}" onchange="updEntry('${emp.id}','incentiveLeavePay',this.value)"></td>
+      <td><input type="number" step="0.5" value="${en.incentiveLeaveDays||0}" onchange="updEntry('${emp.id}','incentiveLeaveDays',this.value)" title="Days × ${peso(emp.rateDay)}/day = ${peso(c.incentiveLeavePay)}"></td>
       <td><input type="number" step="0.01" placeholder="${emp.allowance}" value="${en.allowanceOverride}" onchange="updEntry('${emp.id}','allowanceOverride',this.value)"></td>
       <td><input type="number" step="0.01" value="${en.adjustment}" onchange="updEntry('${emp.id}','adjustment',this.value)"></td>
       <td class="num" style="font-weight:600;">${peso(c.totalEarnings)}</td>
@@ -1206,7 +1211,7 @@ function renderRunDetail(){
       <table>
         <thead><tr>
           <th>Employee</th><th>Hrs Worked</th><th>Late (min)</th><th>OT Hrs</th><th>OT Form?</th><th>Rest Day Hrs</th><th>Holiday Days</th>
-          <th>Commission</th><th>13th Month</th><th>Incentive Leave Pay</th><th>Allowance</th><th>Adj.</th><th>Total Earnings</th>
+          <th>Commission</th><th>13th Month</th><th>Incentive Leave (Days)</th><th>Allowance</th><th>Adj.</th><th>Total Earnings</th>
           <th>Apply</th><th>SSS</th><th>PhilHealth</th><th>Pag-IBIG</th><th>Late Ded.</th><th>Loan</th><th>Cash Adv.</th><th>Other Ded.</th><th>Total Ded.</th><th>Take-Home</th><th></th>
         </tr></thead>
         <tbody>${shownCount>0 ? rows : `<tr><td colspan="23" class="empty-state">No employees match this filter for this run.</td></tr>`}</tbody>
@@ -1665,7 +1670,7 @@ function confirmAddEmployeeToRun(){
   const run = state.runs.find(r=>r.id===currentRunId);
   const prev = lastEntryForEmployee(empId);
   run.entries.push({ employeeId: empId, hoursWorked:0, lateMinutes:0, otHours:0, otApproved:false, restDayHours:0, holidayDays:0,
-    commission:0, thirteenthMonth:0, incentiveLeavePay:0, allowanceOverride:"", adjustment:0, applyStatutory:true,
+    commission:0, thirteenthMonth:0, incentiveLeaveDays:0, incentiveLeavePay:0, allowanceOverride:"", adjustment:0, applyStatutory:true,
     sss: prev?num(prev.sss):0, philhealth: prev?num(prev.philhealth):0, pagibig: prev?num(prev.pagibig):0,
     loanDeduction: prev?num(prev.loanDeduction):0, cashAdvanceDeduction:0, otherDeduction:0 });
   markDirty(); closeModal(); renderRunDetail();
@@ -1678,14 +1683,14 @@ function removeFromRun(empId){
 function exportRunCSV(){
   const run = state.runs.find(r=>r.id===currentRunId);
   if(!run) return;
-  const header = ['Name','Position','Rate/Day','Hours Worked','Late Min','OT Hrs','OT Form?','Rest Day Hrs','Holiday Days','Commission','13th Month','Incentive Leave Pay','Allowance','Adjustment','Total Earnings','SSS','PhilHealth','Pag-IBIG','Late Ded.','Loan','Cash Advance','Other Ded.','Total Deductions','Take-Home','Payment Method','Account'];
+  const header = ['Name','Position','Rate/Day','Hours Worked','Late Min','OT Hrs','OT Form?','Rest Day Hrs','Holiday Days','Commission','13th Month','Incentive Leave Days','Incentive Leave Pay','Allowance','Adjustment','Total Earnings','SSS','PhilHealth','Pag-IBIG','Late Ded.','Loan','Cash Advance','Other Ded.','Total Deductions','Take-Home','Payment Method','Account'];
   const lines = [header.join(',')];
   run.entries.forEach(en=>{
     const emp = empById(en.employeeId); if(!emp) return;
     const c = calcEntry(emp, en, run);
     const allowance = c.allowance;
     const row = [emp.name, emp.position, emp.rateDay, en.hoursWorked, en.lateMinutes, en.otHours, (en.otApproved===true?'Yes':'No'), en.restDayHours, en.holidayDays,
-      en.commission, en.thirteenthMonth, en.incentiveLeavePay, allowance, en.adjustment, c.totalEarnings.toFixed(2),
+      en.commission, en.thirteenthMonth, (en.incentiveLeaveDays||0), c.incentiveLeavePay.toFixed(2), allowance, en.adjustment, c.totalEarnings.toFixed(2),
       c.sss.toFixed(2), c.philhealth.toFixed(2), c.pagibig.toFixed(2), c.lateDeduction.toFixed(2), c.loanDeduction.toFixed(2),
       c.cashAdvanceDeduction.toFixed(2), c.otherDeduction.toFixed(2), c.totalDeductions.toFixed(2), c.takeHome.toFixed(2),
       emp.paymentMethod, (emp.gcashNo||emp.bankAcct||'')];
@@ -1905,7 +1910,7 @@ function payslipHtml(emp, en, run){
       <tr><td>Holiday Pay</td><td class="num">${peso(c.holidayPay)}</td></tr>
       <tr><td>Commission</td><td class="num">${peso(en.commission)}</td></tr>
       <tr><td>13th Month Pay</td><td class="num">${peso(en.thirteenthMonth)}</td></tr>
-      <tr><td>Incentive Leave</td><td class="num">${peso(en.incentiveLeavePay)}</td></tr>
+      <tr><td>Incentive Leave${c.incentiveLeaveDays>0 ? ` (${c.incentiveLeaveDays} day${c.incentiveLeaveDays===1?'':'s'})` : ''}</td><td class="num">${peso(c.incentiveLeavePay)}</td></tr>
       <tr><td>Allowance</td><td class="num">${peso(allowance)}</td></tr>
       <tr><td>Salary Adjustment</td><td class="num">${peso(en.adjustment)}</td></tr>
       <tr class="totalrow"><td>Total Earnings</td><td class="num">${peso(c.totalEarnings)}</td></tr>
@@ -1970,7 +1975,7 @@ function renderLeaveTable(){
   const wrap = document.getElementById('leaveTableWrap'); if(!wrap) return;
   const year = renderLeave._year;
   const emps = sortByName(activeEmployees());
-  wrap.innerHTML = `<table><thead><tr><th>Employee</th><th class="num">Entitled</th><th class="num">Used</th><th class="num">Balance</th><th>Notes / Dates</th></tr></thead><tbody>
+  wrap.innerHTML = `<table><thead><tr><th>Employee</th><th class="num">Entitled</th><th class="num">Used</th><th class="num">Balance</th><th>Notes / Dates</th><th class="no-print"></th></tr></thead><tbody>
   ${emps.map(emp=>{
     const recs = state.incentiveLeave.filter(l=>l.employeeId===emp.id && l.year===year);
     const eligible = isEligibleForIncentiveLeave(emp, year);
@@ -1980,7 +1985,7 @@ function renderLeaveTable(){
     const balance = entitled - used;
     let notes = recs.map(r=>r.note).filter(Boolean).join(' | ');
     if(!eligible && !recs.length) notes = `Not yet eligible — less than 1 year since Date Hired (${fmtDate(emp.dateHired)})`;
-    return `<tr><td>${esc(emp.name)}</td><td class="num">${entitled}</td><td class="num">${used}</td><td class="num" style="font-weight:700;">${balance}</td><td class="muted" style="white-space:normal;">${esc(notes)}</td></tr>`;
+    return `<tr><td>${esc(emp.name)}</td><td class="num">${entitled}</td><td class="num">${used}</td><td class="num" style="font-weight:700;">${balance}</td><td class="muted" style="white-space:normal;">${esc(notes)}</td><td class="no-print"><button class="btn btn-sm" onclick="editEntitledPrompt('${emp.id}', ${year})" title="Directly correct this employee's Entitled/Used totals for ${year}">✎ Edit</button></td></tr>`;
   }).join('')}
   </tbody></table>`;
 }
@@ -1989,10 +1994,11 @@ function addLeaveRecordModal(){
   const body = `<div class="form-grid cols3">
     <div class="field"><label>Employee</label><select id="lv_emp">${emps.map(e=>`<option value="${e.id}">${esc(e.name)}</option>`).join('')}</select></div>
     <div class="field"><label>Year</label><input id="lv_year" type="number" value="${renderLeave._year||new Date().getFullYear()}"></div>
-    <div class="field"><label>Entitled (days)</label><input id="lv_entitled" type="number" value="5"></div>
+    <div class="field"><label>Entitled (days)</label><input id="lv_entitled" type="number" value="0"></div>
     <div class="field"><label>Used (days, this entry)</label><input id="lv_used" type="number" value="0"></div>
     <div class="field" style="grid-column:1/-1;"><label>Note (e.g. dates taken)</label><input id="lv_note" placeholder="e.g. 1 day - June 11"></div>
-  </div>`;
+  </div>
+  <div class="helpbox" style="margin-top:12px;">Entitled defaults to 0 here because this adds ON TOP of the employee's existing total — leave it 0 if you're just logging a used day. Only type a number if you're deliberately granting EXTRA entitled days beyond the normal amount. To fix a wrong Entitled/Used total instead of adding to it, use the ✎ Edit button on that employee's row in the table.</div>`;
   const foot = `<button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="saveLeaveRecord()">Save</button>`;
   openModal("Log Incentive Leave", body, foot);
 }
@@ -2002,6 +2008,36 @@ function saveLeaveRecord(){
     entitled: num(document.getElementById('lv_entitled').value), used: num(document.getElementById('lv_used').value),
     note: document.getElementById('lv_note').value
   });
+  markDirty(); closeModal(); renderLeave(document.getElementById('content'));
+}
+// Directly corrects an employee's Entitled/Used totals for a year, instead of only being able to
+// add more log entries on top (which is how accidental stacking happens — e.g. logging 3 separate
+// used-leave entries that each also carried the default 5 Entitled adds up to 15 instead of 5).
+// This replaces ALL of that employee/year's existing leave records with a single consolidated one
+// holding exactly the numbers typed here, preserving any existing notes/dates so history isn't lost.
+function editEntitledPrompt(empId, year){
+  const emp = empById(empId);
+  if(!emp) return;
+  const recs = state.incentiveLeave.filter(l=>l.employeeId===empId && l.year===year);
+  const eligible = isEligibleForIncentiveLeave(emp, year);
+  const currentEntitled = recs.reduce((a,r)=>a+num(r.entitled),0) || (eligible ? 5 : 0);
+  const currentUsed = recs.reduce((a,r)=>a+num(r.used),0);
+  const notes = recs.map(r=>r.note).filter(Boolean).join(' | ');
+  const body = `<div class="form-grid cols3">
+    <div class="field"><label>Entitled (days)</label><input id="lv_edit_entitled" type="number" value="${currentEntitled}"></div>
+    <div class="field"><label>Used (days)</label><input id="lv_edit_used" type="number" value="${currentUsed}"></div>
+    <div class="field" style="grid-column:1/-1;"><label>Notes / Dates</label><input id="lv_edit_note" value="${esc(notes)}" placeholder="e.g. 1 day - June 11"></div>
+  </div>
+  <div class="helpbox" style="margin-top:12px;">This replaces every existing leave log entry for ${esc(emp.name)} in ${year} with exactly the numbers you enter here — it's a correction, not an addition.</div>`;
+  const foot = `<button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="saveEditedEntitled('${empId}', ${year})">Save</button>`;
+  openModal(`Edit Leave — ${emp.name} (${year})`, body, foot);
+}
+function saveEditedEntitled(empId, year){
+  const newEntitled = num(document.getElementById('lv_edit_entitled').value);
+  const newUsed = num(document.getElementById('lv_edit_used').value);
+  const newNote = document.getElementById('lv_edit_note').value;
+  state.incentiveLeave = state.incentiveLeave.filter(l=>!(l.employeeId===empId && l.year===year));
+  state.incentiveLeave.push({ id: uid('lv'), employeeId: empId, year, entitled: newEntitled, used: newUsed, note: newNote });
   markDirty(); closeModal(); renderLeave(document.getElementById('content'));
 }
 
