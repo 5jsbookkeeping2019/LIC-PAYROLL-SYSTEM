@@ -907,6 +907,8 @@ function editEmployee(id){
     <div class="field"><label>Work Schedule From</label><input id="f_schedFrom" type="time" value="${esc(e.schedFrom||'08:00')}"></div>
     <div class="field"><label>Work Schedule To</label><input id="f_schedTo" type="time" value="${esc(e.schedTo||'17:00')}"></div>
   </div>
+  <div style="margin-top:14px;"><label class="checkline"><input type="checkbox" id="f_isProductionDept" ${(e.isProductionDept===true || (e.isProductionDept===undefined && (e.department||'').toUpperCase().includes('PRODUCTION')))?'checked':''}> Full-time Production Department employee (counts EVERY hour worked toward the Production Commission Split)</label>
+  <div class="helpbox" style="margin-top:6px;">Leave this UNCHECKED for someone who only occasionally helps out in Production (like Alfie) — for them, use the "Production?" checkbox on the specific days in their Time Sheet instead, so only those days count.</div></div>
   ${!isNew ? `<div style="margin-top:14px;"><label class="checkline"><input type="checkbox" id="f_active" ${e.active!==false?'checked':''}> Active employee</label></div>` : ''}`;
 
   const foot = `
@@ -997,6 +999,7 @@ function saveEmployee(id, isNew){
     philhealthNo: get('f_philhealthNo'), pagibigNo: get('f_pagibigNo'), paymentMethod: get('f_paymentMethod'),
     gcashNo: get('f_gcashNo'), bankAcct: get('f_paymentMethod')==='bank' ? get('f_gcashNo') : '',
     schedFrom: get('f_schedFrom') || '08:00', schedTo: get('f_schedTo') || '17:00',
+    isProductionDept: document.getElementById('f_isProductionDept').checked,
     active: isNew ? true : document.getElementById('f_active').checked
   };
   if(!rec.name){ alert("Name is required"); return; }
@@ -2169,7 +2172,14 @@ function saveCommission(){
 // written on those days.
 function computeProductionHoursForMonth(emp, year, month){
   let hours = 0;
-  const isProdDept = (emp.department||'').toUpperCase().includes('PRODUCTION');
+  // isProductionDept is an explicit per-employee toggle (Employee edit form) — NOT guessed from the
+  // department/position text. Guessing by matching "production" in a free-text field is fragile: it
+  // wrongly matches phrases like "not production today", and it wrongly matches anyone whose
+  // department/position text happens to mention Production even though they're not a full-time
+  // Production Department member (e.g. Alfie's position title contains "PRODUCTION"). Only fall back
+  // to the old text-guess when the field has genuinely never been set (undefined) — once someone
+  // saves the Employee form once (checking or unchecking the box), that explicit value always wins.
+  const isProdDept = emp.isProductionDept === true || (emp.isProductionDept === undefined && (emp.department||'').toUpperCase().includes('PRODUCTION'));
   state.runs.forEach(r=>{
     const d = new Date(r.periodEnd+'T00:00:00');
     if(d.getFullYear()!==year || (d.getMonth()+1)!==month) return;
@@ -2213,7 +2223,7 @@ function addProductionSplitModal(){
     <div class="field"><label>Total Production Commission Pool (₱)</label><input id="ps_pool" type="number" step="0.01" value="0"></div>
     <div class="field"><label>Date to Log</label><input id="ps_date" type="date" value="${todayISO()}"></div>
   </div>
-  <div class="helpbox">Splits the pool proportionally by actual hours worked (including OT) that month, from each employee's Time Sheet. Production Department employees count every hour worked; anyone else (like Alfie) only counts hours on days checked "Production?" in their Time Sheet — open his Time Sheet for this period and check that box on the exact days he actually worked in Production.</div>
+  <div class="helpbox">Splits the pool proportionally by actual hours worked (including OT) that month, from each employee's Time Sheet. Anyone marked "Full-time Production Department employee" on their Employee record counts every hour worked; everyone else (like Alfie) only counts hours on days checked "Production?" in their Time Sheet. If someone's total here looks wrong, check both places: their Employee record's Production checkbox, and the day-by-day "Production?" boxes on their Time Sheet.</div>
   <div id="ps_preview" style="margin-top:10px;"></div>`;
   const foot = `<button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="saveProductionSplit()">Log Commission Shares</button>`;
   openModal("Compute Production Commission Split", body, foot, {wide:true});
