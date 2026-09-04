@@ -217,6 +217,10 @@ small.hint{display:block;color:var(--ink-soft);font-size:11.5px;margin-top:3px;}
       <input id="emp_login_name" type="text" placeholder="Full Name (as on your payslip)" autocomplete="name" style="padding:10px;border:1px solid #ccc;border-radius:7px;font-size:14px;">
       <label class="hint" style="margin:-4px 0 -4px 2px;">Birthday</label>
       <input id="emp_login_birthday" type="date" style="padding:10px;border:1px solid #ccc;border-radius:7px;font-size:14px;">
+      <div id="emp_login_pin_wrap" style="display:none;flex-direction:column;gap:6px;">
+        <label class="hint" style="margin:0 0 -4px 2px;">PIN</label>
+        <input id="emp_login_pin" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="8" placeholder="Enter your PIN" autocomplete="off" style="padding:10px;border:1px solid #ccc;border-radius:7px;font-size:14px;">
+      </div>
       <button id="emp_login_btn" class="btn btn-primary" style="padding:10px;justify-content:center;">Sign In</button>
       <div id="emp_login_error" style="color:#c0392b;font-size:12.5px;min-height:16px;"></div>
       <small class="hint" style="text-align:center;">View your own payslips only.</small>
@@ -352,6 +356,7 @@ async function initAuth(){
   document.getElementById('emp_login_btn').addEventListener('click', handleEmployeeLogin);
   document.getElementById('emp_login_birthday').addEventListener('keydown', e=>{ if(e.key==='Enter') handleEmployeeLogin(); });
   document.getElementById('emp_login_name').addEventListener('keydown', e=>{ if(e.key==='Enter') document.getElementById('emp_login_birthday').focus(); });
+  document.getElementById('emp_login_pin').addEventListener('keydown', e=>{ if(e.key==='Enter') handleEmployeeLogin(); });
   setLoginRole('admin');
 
   sb.auth.onAuthStateChange((event, session)=>{
@@ -452,19 +457,32 @@ async function saveStateToCloud(silent){
 async function handleEmployeeLogin(){
   const name = document.getElementById('emp_login_name').value.trim();
   const birthday = document.getElementById('emp_login_birthday').value;
+  const pinWrap = document.getElementById('emp_login_pin_wrap');
+  const pin = document.getElementById('emp_login_pin').value.trim();
   const errEl = document.getElementById('emp_login_error');
   const btn = document.getElementById('emp_login_btn');
   errEl.textContent = '';
   if(!name || !birthday){ errEl.textContent = 'Enter your full name and birthday.'; return; }
   btn.disabled = true; btn.textContent = 'Signing in…';
-  const { data, error } = await sb.rpc('get_employee_own_data', { p_name: name, p_birthday: birthday });
+  const { data, error } = await sb.rpc('get_employee_own_data', { p_name: name, p_birthday: birthday, p_pin: pin || null });
   btn.disabled = false; btn.textContent = 'Sign In';
   if(error){
-    errEl.textContent = "Couldn't look that up (" + error.message + "). Make sure the Employee Self-Service section of the setup SQL has been run in Supabase.";
+    errEl.textContent = "Couldn't look that up (" + error.message + "). Make sure the latest Employee Self-Service section of the setup SQL has been run in Supabase.";
     return;
   }
   if(!data){
     errEl.textContent = "No employee found with that exact name and birthday. Check your spelling and try again.";
+    return;
+  }
+  // This name+birthday already has a PIN set up — reveal the PIN field (name/birthday are kept
+  // filled in) and ask for it instead of logging in yet. Submitting again with the PIN filled in
+  // re-runs this same function, this time sending p_pin too.
+  if(data.pinRequired === true){
+    pinWrap.style.display = 'flex';
+    document.getElementById('emp_login_pin').focus();
+    errEl.style.color = '#0f2e1c';
+    errEl.textContent = pin ? 'Incorrect PIN. Try again.' : 'This account is PIN-protected — enter your PIN to continue.';
+    errEl.style.color = pin ? '#c0392b' : '#0f2e1c';
     return;
   }
   employeeSession = data;
@@ -478,6 +496,8 @@ async function handleEmployeeLogin(){
   };
   document.getElementById('emp_login_name').value = '';
   document.getElementById('emp_login_birthday').value = '';
+  document.getElementById('emp_login_pin').value = '';
+  pinWrap.style.display = 'none';
   document.getElementById('loginScreen').style.display = 'none';
   document.getElementById('employeePortal').style.display = '';
   document.getElementById('empPortalWelcome').textContent = 'Hi, ' + data.employee.name;
@@ -487,6 +507,8 @@ function employeeSignOut(){
   employeeSession = null;
   state = loadFromMemoryOrDefault();
   document.getElementById('employeePortal').style.display = 'none';
+  document.getElementById('emp_login_pin_wrap').style.display = 'none';
+  document.getElementById('emp_login_pin').value = '';
   document.getElementById('loginScreen').style.display = 'flex';
   setLoginRole('employee');
 }
@@ -494,7 +516,15 @@ function employeeShowList(){
   const emp = state.employees[0];
   const runs = [...state.runs].sort((a,b)=> new Date(b.periodEnd) - new Date(a.periodEnd));
   const holder = document.getElementById('employeePortalContent');
+  const hasPin = employeeSession && employeeSession.hasPin === true;
   holder.innerHTML = `
+  <div class="section" style="margin-bottom:14px;">
+    <div class="section-head">
+      <div><h3>🔒 Account Security</h3><div class="desc">${hasPin ? "A PIN is protecting your payslips from coworkers who might know your name and birthday." : "Set up a PIN so coworkers who know your name and birthday still can't open your payslips."}</div></div>
+      <div class="flexrow no-print"><button class="btn btn-sm" onclick="employeeTogglePinForm()">${hasPin ? '🔑 Change PIN' : '➕ Set Up a PIN'}</button></div>
+    </div>
+    <div class="section-body" id="empPinFormWrap" style="display:none;"></div>
+  </div>
   <div class="section">
     <div class="section-head"><div><h3>My Payslips</h3><div class="desc">${esc(emp.position||'')}</div></div></div>
     <div class="section-body">
@@ -507,6 +537,48 @@ function employeeShowList(){
       </tbody></table></div>` : `<div class="empty-state">No payslips on file yet.</div>`}
     </div>
   </div>`;
+}
+// Toggles the inline "Set Up a PIN" / "Change PIN" mini-form on the employee portal's landing
+// page. Setting a PIN for the first time needs no current PIN (there isn't one yet); changing an
+// existing one requires re-entering it — see set_employee_pin in supabase_setup.sql.
+function employeeTogglePinForm(){
+  const wrap = document.getElementById('empPinFormWrap');
+  if(!wrap) return;
+  const opening = wrap.style.display === 'none';
+  if(!opening){ wrap.style.display = 'none'; return; }
+  const hasPin = employeeSession && employeeSession.hasPin === true;
+  wrap.innerHTML = `
+    <div class="form-grid cols3">
+      ${hasPin ? `<div class="field"><label>Current PIN</label><input id="epin_current" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="8" autocomplete="off"></div>` : ''}
+      <div class="field"><label>New PIN (4–8 digits)</label><input id="epin_new" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="8" autocomplete="off"></div>
+      <div class="field"><label>Confirm New PIN</label><input id="epin_confirm" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="8" autocomplete="off"></div>
+    </div>
+    <div class="flexrow" style="margin-top:10px;">
+      <button class="btn btn-primary btn-sm" onclick="employeeSavePin()">${hasPin ? 'Change PIN' : 'Set PIN'}</button>
+      <button class="btn btn-sm" onclick="employeeTogglePinForm()">Cancel</button>
+    </div>
+    <div id="epin_error" style="font-size:12.5px;margin-top:6px;min-height:16px;"></div>`;
+  wrap.style.display = '';
+}
+async function employeeSavePin(){
+  const emp = employeeSession.employee;
+  const hasPin = employeeSession.hasPin === true;
+  const current = hasPin ? document.getElementById('epin_current').value.trim() : null;
+  const next = document.getElementById('epin_new').value.trim();
+  const confirmVal = document.getElementById('epin_confirm').value.trim();
+  const errEl = document.getElementById('epin_error');
+  errEl.style.color = '#c0392b';
+  errEl.textContent = '';
+  if(hasPin && !current){ errEl.textContent = 'Enter your current PIN.'; return; }
+  if(!/^[0-9]{4,8}$/.test(next)){ errEl.textContent = 'New PIN must be 4–8 digits, numbers only.'; return; }
+  if(next !== confirmVal){ errEl.textContent = "New PIN and confirmation don't match."; return; }
+  errEl.style.color = '#0f2e1c'; errEl.textContent = 'Saving…';
+  const { data, error } = await sb.rpc('set_employee_pin', { p_name: emp.name, p_birthday: emp.birthday, p_current_pin: current, p_new_pin: next });
+  if(error){ errEl.style.color = '#c0392b'; errEl.textContent = 'Could not save: ' + error.message; return; }
+  if(!data || data.ok !== true){ errEl.style.color = '#c0392b'; errEl.textContent = (data && data.error) || 'Could not save your PIN.'; return; }
+  employeeSession.hasPin = true;
+  toast(hasPin ? 'PIN changed.' : "PIN set — you'll need it next time you sign in.");
+  employeeShowList();
 }
 function employeeViewPayslip(runId){
   const emp = state.employees[0];
@@ -901,6 +973,8 @@ function editEmployee(id){
     <div class="field"><label>Date Hired</label><input id="f_dateHired" type="date" value="${e.dateHired||''}"></div>
     <div class="field"><label>End Date (if separated)</label><input id="f_endDate" type="date" value="${e.endDate||''}"></div>
     <div class="field"><label>Birthday</label><input id="f_birthday" type="date" value="${e.birthday||''}" title="Used for this employee's own Employee sign-in (name + birthday) to view their payslips"></div>
+    ${!isNew ? `<div class="field"><label>Employee Portal PIN</label><input value="${e.pinHash ? '🔒 PIN is set' : '— No PIN set yet —'}" disabled>
+      ${e.pinHash ? `<button class="btn btn-sm" style="margin-top:4px;" onclick="resetEmployeePin('${e.id}')" title="Clears their PIN so they can sign in with just Name + Birthday again — use this if they forgot their PIN">🔓 Reset PIN</button>` : ''}</div>` : ''}
     <div class="field"><label>TIN</label><input id="f_tin" value="${esc(e.tin||'')}"></div>
     <div class="field"><label>SSS No.</label><input id="f_sssNo" value="${esc(e.sssNo||'')}">
       <label class="checkline" style="margin-top:4px;"><input type="checkbox" id="f_sssExempt" ${e.sssExempt===true?'checked':''}> Don't deduct SSS</label></div>
@@ -1024,6 +1098,15 @@ function saveEmployee(id, isNew){
   else { const idx = state.employees.findIndex(x=>x.id===id); state.employees[idx] = {...state.employees[idx], ...rec}; }
   markDirty(); closeModal(); render(); toast("Employee saved");
 }
+// Clears an employee's self-service PIN (used when they forget it) — they can then sign in again
+// with just Name + Birthday, and will be prompted to set a new PIN from inside the portal.
+function resetEmployeePin(id){
+  const emp = empById(id); if(!emp) return;
+  if(!confirm(`Reset ${emp.name}'s PIN? They'll be able to sign in with just their Name + Birthday until they set a new one.`)) return;
+  delete emp.pinHash;
+  markDirty(); closeModal(); editEmployee(id);
+  toast("PIN reset.");
+}
 function deleteEmployee(id){
   if(!confirm("Remove this employee? This does not delete past payroll history, but their name will still appear there. Consider marking them Inactive instead.")) return;
   state.employees = state.employees.filter(e=>e.id!==id);
@@ -1113,6 +1196,23 @@ function eligibleForStatutory(emp, type){
   if(type==='pagibig') return !!emp.pagibigNo && emp.pagibigExempt !== true;
   return true;
 }
+// Re-syncs every entry's Loan/CA deduction in an already-created run against the loan/installment
+// schedule (see scheduledLoanDeductionForRun) — for fixing up a run that was created before its
+// employees' scheduled installments were set up, or before this exact-payday matching existed
+// (older runs may have carried forward a flat amount from the previous cutoff regardless of
+// whether anything was actually due that payday).
+function syncLoanDeductionsForRun(runId){
+  const run = state.runs.find(r=>r.id===runId);
+  if(!run) return;
+  if(!confirm("This will replace every employee's Loan/Cash Advance deduction in this run with whatever is actually scheduled for this exact Pay Date (" + fmtDate(run.payDate) + ") in Loans & Deductions — overwriting current values. Continue?")) return;
+  let count = 0;
+  run.entries.forEach(en=>{
+    en.loanDeduction = scheduledLoanDeductionForRun(en.employeeId, run);
+    count++;
+  });
+  markDirty(); renderRunDetail();
+  toast(`Synced Loan/Cash Advance deductions for ${count} employee${count===1?'':'s'} against this Pay Date's schedule.`);
+}
 function autoCalcStatutory(runId){
   const run = state.runs.find(r=>r.id===runId);
   if(!run) return;
@@ -1158,7 +1258,7 @@ function createRun(){
       sss: (eligibleForStatutory(emp,'sss') && prev) ? num(prev.sss) : 0,
       philhealth: !eligibleForStatutory(emp,'philhealth') ? 0 : (prev ? num(prev.philhealth) : philhealthCompute(emp.rateDay*22)),
       pagibig: !eligibleForStatutory(emp,'pagibig') ? 0 : (prev ? num(prev.pagibig) : pagibigCompute(emp.rateDay*22)),
-      loanDeduction: prev ? num(prev.loanDeduction) : 0, cashAdvanceDeduction:0, otherDeduction:0
+      loanDeduction: scheduledLoanDeductionForRun(emp.id, run), cashAdvanceDeduction:0, otherDeduction:0
     });
   });
   state.runs.push(run);
@@ -1254,6 +1354,7 @@ function renderRunDetail(){
         <button class="btn" onclick="document.getElementById('attendanceFileInput').click()" title="Upload the biometric attendance Excel export for this period to auto-fill hours worked / late minutes">📥 Import Attendance (Excel)</button>
         <input type="file" id="attendanceFileInput" accept=".xlsx,.xls" style="display:none" onchange="if(this.files[0]) handleAttendanceFile(this.files[0]); this.value='';">
         ${isLastCutoffOfMonth(run) ? `<button class="btn" onclick="autoCalcStatutory('${run.id}')" title="Combines this cutoff's basic salary with the 1st–15th cutoff, looks up SSS from the bracket table, and carries forward PhilHealth/Pag-IBIG from the last payday">🧮 Auto-Calc SSS/PhilHealth/Pag-IBIG</button>` : ''}
+        <button class="btn" onclick="syncLoanDeductionsForRun('${run.id}')" title="Replaces each employee's Loan/Cash Advance deduction with whatever is actually scheduled for this exact Pay Date — so a monthly-only loan (e.g. Pag-IBIG) doesn't get deducted on a cutoff it isn't due">🔄 Sync Loan Deductions</button>
         <button class="btn" onclick="exportRunCSV()">⬇ Export CSV</button>
         <button class="btn btn-primary" onclick="currentPage='payslips';render()">🧾 View Payslips</button>
       </div>
@@ -1761,7 +1862,7 @@ function confirmAddEmployeeToRun(){
     sss: (eligibleForStatutory(emp,'sss') && prev) ? num(prev.sss) : 0,
     philhealth: (eligibleForStatutory(emp,'philhealth') && prev) ? num(prev.philhealth) : 0,
     pagibig: (eligibleForStatutory(emp,'pagibig') && prev) ? num(prev.pagibig) : 0,
-    loanDeduction: prev?num(prev.loanDeduction):0, cashAdvanceDeduction:0, otherDeduction:0 });
+    loanDeduction: scheduledLoanDeductionForRun(empId, run), cashAdvanceDeduction:0, otherDeduction:0 });
   markDirty(); closeModal(); renderRunDetail();
 }
 function removeFromRun(empId){
@@ -2442,6 +2543,18 @@ function stepPayday(dateStr, freq){
   const nm = (m===11) ? 0 : m+1;
   const ny = (m===11) ? y+1 : y;
   return `${ny}-${p2(nm+1)}-04`;
+}
+// A scheduled installment (from an Installment Plan — see computeInstallmentSchedule) is only
+// actually due on payroll runs whose Pay Date matches the exact date it was scheduled for — NOT
+// on every payroll run for that employee. This matters because not every loan/deduction repeats
+// every payday: some are set to "Monthly Only", landing on just one of the two cutoffs a month
+// (e.g. Pag-IBIG loans, deducted every 4th only). Summed across every unpaid scheduled entry that
+// lands on this exact payday, in case more than one loan is due the same cutoff.
+function scheduledLoanDeductionForRun(empId, run){
+  if(!run || !run.payDate) return 0;
+  return state.loans
+    .filter(l => l.employeeId===empId && num(l.amount)<0 && l.deducted!==true && l.date===run.payDate)
+    .reduce((a,l)=> a + Math.abs(num(l.amount)), 0);
 }
 function computeInstallmentSchedule(total, installment, firstDate, freq){
   total = num(total); installment = Math.abs(num(installment));
