@@ -2973,9 +2973,20 @@ function computeAnnualTotals(year, month){
     });
   });
   state.commissions.forEach(cm=>{
-    if(!cm.date) return;
-    if(new Date(cm.date).getFullYear() !== year) return;
-    if(month && (new Date(cm.date).getMonth()+1) !== month) return;
+    // Classify this commission by the PAY PERIOD it's actually disbursed under — the linked payroll
+    // run's Period Start, when it's linked to one via its "Pay Period" dropdown (cm.runId) — rather
+    // than by cm.date, which is typically just the date someone logged/computed the commission split
+    // (often weeks later, e.g. when doing the Production Commission Split) and can land in a
+    // completely different month than the pay period it was actually paid out with. Getting this
+    // right only matters once the report is filtered down to a single month (year-only filtering
+    // rarely crosses a year boundary the same way); a commission with no run link falls back to its
+    // own date, which is the only date it has.
+    const linkedRun = cm.runId ? state.runs.find(r=>r.id===cm.runId) : null;
+    const classifyDateStr = linkedRun ? linkedRun.periodStart : cm.date;
+    if(!classifyDateStr) return;
+    const classifyDate = new Date(classifyDateStr);
+    if(classifyDate.getFullYear() !== year) return;
+    if(month && (classifyDate.getMonth()+1) !== month) return;
     const emp = empById(cm.employeeId); if(!emp) return;
     const t = ensure(emp);
     const type = (cm.type||'').toUpperCase();
