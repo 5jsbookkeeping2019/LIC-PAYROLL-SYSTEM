@@ -724,11 +724,19 @@ function calcEntry(emp, entry, run){
     .filter(cm => cm.runId === run.id && cm.employeeId === emp.id && (cm.type === 'LIC' || cm.type === 'Production'))
     .reduce((a,cm) => a + num(cm.amount), 0);
 
-  const basicSalary = hoursWorked * hr;
-  const restDayPay = hr * num(state.settings.restDayMultiplier) * restDayHours;
-  // Company policy: overtime is only paid once a signed Overtime Request Summary Form is on file.
-  // otHours is still recorded (so unpaid-but-worked OT stays visible), but otPay is 0 until otApproved is checked.
+  // Hours Worked is entered as the TOTAL hours physically present that cutoff — it includes
+  // whatever portion fell on a rest day or on overtime. Basic Salary must only cover the
+  // REGULAR-rate portion of that time (same as the "REGULAR HRS." column in the company's own
+  // payroll Excel: TOTAL HOURS WORKED − REST DAY HOURS − OVERTIME = REGULAR HRS., × Hourly Rate =
+  // BASIC SALARY). Rest Day Pay and OT Pay already pay their own hours in full at hourly rate × the
+  // rest-day/OT multiplier below, so leaving those hours inside Basic Salary too would pay them
+  // twice. OT hours are always carved out of Basic Salary regardless of approval — company policy:
+  // without a signed Overtime Request Summary Form on file, that OT time isn't included/paid at
+  // all (otPay also stays 0 below in that case).
   const otApproved = entry.otApproved === true;
+  const regularHours = Math.max(0, hoursWorked - restDayHours - otHours);
+  const basicSalary = regularHours * hr;
+  const restDayPay = hr * num(state.settings.restDayMultiplier) * restDayHours;
   const otPay = otApproved ? hr * num(state.settings.otMultiplier) * otHours : 0;
   const holidayPay = rateDay * holidayDays;
 
