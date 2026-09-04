@@ -1949,6 +1949,18 @@ function renderDisbursementList(runId){
   const sections = order.map(method => {
     const list = rows.filter(r=>r.method===method);
     if(!list.length) return '';
+    // Bank Transfer: group by Bank Name first (so all BDO together, all BPI together, etc.),
+    // then lowest-to-highest salary within each bank. GCash/Cash: just lowest-to-highest salary.
+    if(method==='bank'){
+      list.sort((a,b)=>{
+        const bankA = (a.emp.bankName||'').trim().toUpperCase();
+        const bankB = (b.emp.bankName||'').trim().toUpperCase();
+        if(bankA !== bankB) return bankA.localeCompare(bankB);
+        return a.c.takeHome - b.c.takeHome;
+      });
+    } else {
+      list.sort((a,b)=> a.c.takeHome - b.c.takeHome);
+    }
     const subtotal = list.reduce((a,r)=>a+r.c.takeHome,0);
     grand += subtotal;
     grandPaid += list.filter(r=>r.en.disbursed===true).reduce((a,r)=>a+r.c.takeHome,0);
@@ -1977,7 +1989,21 @@ function toggleDisbursed(runId, empId, val){
 }
 function exportDisbursementCSV(runId){
   const run = state.runs.find(r=>r.id===runId); if(!run) return;
-  const rows = disbursementRows(run);
+  const order = ['gcash','bank','cash'];
+  const rows = order.flatMap(method=>{
+    const list = disbursementRows(run).filter(r=>r.method===method);
+    if(method==='bank'){
+      list.sort((a,b)=>{
+        const bankA = (a.emp.bankName||'').trim().toUpperCase();
+        const bankB = (b.emp.bankName||'').trim().toUpperCase();
+        if(bankA !== bankB) return bankA.localeCompare(bankB);
+        return a.c.takeHome - b.c.takeHome;
+      });
+    } else {
+      list.sort((a,b)=> a.c.takeHome - b.c.takeHome);
+    }
+    return list;
+  });
   const header = ['Employee','Payment Method','Bank Name','Account No.','Take-Home','Paid?'];
   const lines = [header.join(',')];
   rows.forEach(r=>{
