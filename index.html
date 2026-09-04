@@ -308,11 +308,30 @@ function loadFromMemoryOrDefault(){
   return defaultState();
 }
 
-function markDirty(){ dirty = true; updateSaveBtn(); }
+// Autosave: every edit (markDirty is called from every single field handler across the app)
+// restarts a short countdown; once nothing has changed for AUTOSAVE_DELAY_MS, it silently saves
+// to the cloud on its own — no need to remember to click "Save to Cloud". The button stays in
+// place for an immediate manual save (e.g. right before closing the tab) and still shows exactly
+// what's happening: unsaved / saving / saved.
+const AUTOSAVE_DELAY_MS = 3000;
+let autosaveTimer = null;
+let autosaving = false;
+function markDirty(){
+  dirty = true; updateSaveBtn();
+  if(autosaveTimer) clearTimeout(autosaveTimer);
+  autosaveTimer = setTimeout(runAutosave, AUTOSAVE_DELAY_MS);
+}
+async function runAutosave(){
+  autosaveTimer = null;
+  if(!dirty || autosaving) return;
+  autosaving = true; updateSaveBtn();
+  await saveStateToCloud(true); // silent — no toast spam on every autosave tick
+  autosaving = false; updateSaveBtn();
+}
 function updateSaveBtn(){
   const b = document.getElementById('btnSave');
   if(!b) return;
-  b.textContent = dirty ? "☁️ Save to Cloud *" : "☁️ Save to Cloud";
+  b.textContent = autosaving ? "☁️ Saving…" : (dirty ? "☁️ Unsaved changes…" : "☁️ Saved to Cloud");
   b.classList.toggle('btn-primary', true);
 }
 
@@ -401,6 +420,7 @@ async function loadStateFromCloud(){
   dirty = false; updateSaveBtn(); render();
 }
 async function saveStateToCloud(silent){
+  if(autosaveTimer){ clearTimeout(autosaveTimer); autosaveTimer = null; } // a save is happening now, no need for the pending autosave tick too
   state.meta.savedAt = new Date().toISOString();
   const { data: { user } } = await sb.auth.getUser();
   const { error } = await sb.from('payroll_state').upsert({
@@ -2082,13 +2102,15 @@ function renderCommissions(root){
   root.innerHTML = `
   <div class="section">
     <div class="section-head">
-      <div><h3>Commission Log</h3><div class="desc">Track 5JS/LIC commission claims per employee.</div></div>
+      <div><h3>Commission Log</h3><div class="desc">Track 5JS/LIC/Production commission claims per employee.</div></div>
       <div class="flexrow no-print">
         <select id="comm_type_filter">
           <option value="all">All Types</option>
           <option value="LIC">LIC only</option>
           <option value="5JS">5JS only</option>
+          <option value="Production">Production only</option>
         </select>
+        <button class="btn" onclick="addProductionSplitModal()" title="Split a Production Department commission pool proportionally by hours worked that month">🏭 Compute Production Split</button>
         <button class="btn btn-primary" onclick="addCommissionModal()">+ Add Commission</button>
       </div>
     </div>
@@ -2106,10 +2128,10 @@ function renderCommTable(){
   const total = list.reduce((s,c)=>s+num(c.amount),0);
   wrap.innerHTML = `
   <div class="helpbox">${commTypeFilter==='all'?'All types':esc(commTypeFilter)} — ${list.length} entr${list.length===1?'y':'ies'}, total ${peso(total)}</div>
-  <table><thead><tr><th>Date</th><th>Employee</th><th>Type</th><th class="num">Amount</th><th>Claimed</th><th></th></tr></thead><tbody>
+  <table><thead><tr><th>Date</th><th>Employee</th><th>Type</th><th>Remarks</th><th class="num">Amount</th><th>Claimed</th><th></th></tr></thead><tbody>
   ${list.map(c=>{
     const emp = empById(c.employeeId);
-    return `<tr><td>${fmtDate(c.date)}</td><td>${esc(emp?emp.name:'(deleted)')}</td><td>${esc(c.type)}</td><td class="num">${peso(c.amount)}</td>
+    return `<tr><td>${fmtDate(c.date)}</td><td>${esc(emp?emp.name:'(deleted)')}</td><td>${esc(c.type)}</td><td class="muted" style="white-space:normal;">${esc(c.remarks||'')}</td><td class="num">${peso(c.amount)}</td>
     <td><label class="checkline"><input type="checkbox" ${c.claimed?'checked':''} onchange="toggleCommClaimed('${c.id}',this.checked)"></label></td>
     <td><button class="btn btn-sm btn-danger" onclick="deleteCommission('${c.id}')">✕</button></td></tr>`;
   }).join('')}
@@ -2119,17 +2141,108 @@ function addCommissionModal(){
   const emps = sortByName(activeEmployees());
   const body = `<div class="form-grid cols3">
     <div class="field"><label>Employee</label><select id="cm_emp">${emps.map(e=>`<option value="${e.id}">${esc(e.name)}</option>`).join('')}</select></div>
-    <div class="field"><label>Type</label><select id="cm_type"><option>LIC</option><option>5JS</option><option>Other</option></select></div>
+    <div class="field"><label>Type</label><select id="cm_type"><option>LIC</option><option>5JS</option><option>Production</option><option>Other</option></select></div>
     <div class="field"><label>Amount (₱)</label><input id="cm_amount" type="number" step="0.01" value="0"></div>
     <div class="field"><label>Date</label><input id="cm_date" type="date" value="${todayISO()}"></div>
+    <div class="field" style="grid-column:1/-1;"><label>Remarks</label><input id="cm_remarks" placeholder="optional"></div>
   </div>`;
   const foot = `<button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="saveCommission()">Save</button>`;
   openModal("Add Commission", body, foot);
 }
 function saveCommission(){
   state.commissions.push({ id: uid('cm'), employeeId: document.getElementById('cm_emp').value, type: document.getElementById('cm_type').value,
-    amount: num(document.getElementById('cm_amount').value), date: document.getElementById('cm_date').value, claimed:false });
+    amount: num(document.getElementById('cm_amount').value), date: document.getElementById('cm_date').value,
+    remarks: document.getElementById('cm_remarks').value, claimed:false });
   markDirty(); closeModal(); renderCommTable();
+}
+// ---- Production Department commission split ----
+// The Production Department's commission pool is divided among everyone who actually worked in
+// Production that month, in proportion to hours worked — not split evenly. Employees whose home
+// department IS Production count every hour they worked. Anyone else (e.g. Alfie, whose regular
+// department is Liaison but who sometimes gets pulled into Production) only counts hours from
+// days where that day's Time Sheet Remarks mentions "production" — the same note already being
+// written on those days.
+function computeProductionHoursForMonth(emp, year, month){
+  let hours = 0;
+  const isProdDept = (emp.department||'').toUpperCase().includes('PRODUCTION');
+  state.runs.forEach(r=>{
+    const d = new Date(r.periodEnd+'T00:00:00');
+    if(d.getFullYear()!==year || (d.getMonth()+1)!==month) return;
+    const en = r.entries.find(e=>e.employeeId===emp.id);
+    if(!en || !Array.isArray(en.timesheet)) return;
+    const schedFromMin = timeToMinutes(en.schedFrom);
+    const schedToMin = timeToMinutes(en.schedTo);
+    en.timesheet.forEach(day=>{
+      if(!day.timeIn || !day.timeOut) return;
+      if(!isProdDept && !/production/i.test(day.remarks||'')) return;
+      const daySched = resolveDaySchedule(day, schedFromMin, schedToMin);
+      const { hoursWorked } = computeDayHours(day, daySched.fromMin, daySched.toMin, daySched.isOverride);
+      hours += hoursWorked;
+    });
+  });
+  return hours;
+}
+function computeProductionCommissionSplit(year, month, poolAmount){
+  const rows = activeEmployees()
+    .map(emp => ({ employeeId: emp.id, name: emp.name, hours: computeProductionHoursForMonth(emp, year, month) }))
+    .filter(r => r.hours > 0.005)
+    .sort((a,b)=> b.hours - a.hours);
+  const totalHours = rows.reduce((a,r)=>a+r.hours,0);
+  if(totalHours <= 0) return { rows: [], totalHours: 0 };
+  let allocated = 0;
+  rows.forEach((r,i)=>{
+    if(i === rows.length-1){
+      r.share = Math.round((poolAmount - allocated)*100)/100; // last row absorbs the rounding remainder
+    } else {
+      r.share = Math.round((poolAmount * (r.hours/totalHours))*100)/100;
+      allocated += r.share;
+    }
+  });
+  return { rows, totalHours };
+}
+function addProductionSplitModal(){
+  const now = new Date();
+  const defaultMonth = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+  const body = `<div class="form-grid cols3">
+    <div class="field"><label>Month</label><input id="ps_month" type="month" value="${defaultMonth}"></div>
+    <div class="field"><label>Total Production Commission Pool (₱)</label><input id="ps_pool" type="number" step="0.01" value="0"></div>
+    <div class="field"><label>Date to Log</label><input id="ps_date" type="date" value="${todayISO()}"></div>
+  </div>
+  <div class="helpbox">Splits the pool proportionally by actual hours worked that month, from each employee's Time Sheet. Production Department employees count every hour worked; anyone else (like Alfie) only counts hours on days whose Time Sheet Remarks mention "production" — the note you already write on those days.</div>
+  <div id="ps_preview" style="margin-top:10px;"></div>`;
+  const foot = `<button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="saveProductionSplit()">Log Commission Shares</button>`;
+  openModal("Compute Production Commission Split", body, foot, {wide:true});
+  ['ps_month','ps_pool'].forEach(id=>{
+    document.getElementById(id).addEventListener('input', updateProductionSplitPreview);
+  });
+  updateProductionSplitPreview();
+}
+function updateProductionSplitPreview(){
+  const prev = document.getElementById('ps_preview'); if(!prev) return;
+  const [y,m] = (document.getElementById('ps_month').value||'').split('-').map(Number);
+  const pool = num(document.getElementById('ps_pool').value);
+  if(!y || !m || pool<=0){ prev.innerHTML = '<div class="helpbox">Enter the month and pool amount to preview the split.</div>'; return; }
+  const { rows, totalHours } = computeProductionCommissionSplit(y, m, pool);
+  if(!rows.length){ prev.innerHTML = '<div class="helpbox warn">No Production hours found for that month — check that timesheets are filled in and Alfie-style entries have "production" noted in their Remarks.</div>'; return; }
+  prev.innerHTML = `<table class="ts-table"><thead><tr><th>Employee</th><th class="num">Hours Worked</th><th class="num">Share</th></tr></thead><tbody>
+  ${rows.map(r=>`<tr><td>${esc(r.name)}</td><td class="num">${r.hours.toFixed(2)}</td><td class="num">${peso(r.share)}</td></tr>`).join('')}
+  </tbody><tfoot><tr style="font-weight:700;background:#fafbfc;"><td>TOTAL</td><td class="num">${totalHours.toFixed(2)}</td><td class="num">${peso(rows.reduce((a,r)=>a+r.share,0))}</td></tr></tfoot></table>`;
+}
+function saveProductionSplit(){
+  const [y,m] = (document.getElementById('ps_month').value||'').split('-').map(Number);
+  const pool = num(document.getElementById('ps_pool').value);
+  const date = document.getElementById('ps_date').value;
+  if(!y||!m){ alert('Pick a month.'); return; }
+  if(pool<=0){ alert('Enter the total pool amount.'); return; }
+  const { rows } = computeProductionCommissionSplit(y, m, pool);
+  if(!rows.length){ alert('No Production hours found for that month — nothing to split.'); return; }
+  const monthLabel = new Date(y, m-1, 1).toLocaleDateString('en-PH', {month:'long', year:'numeric'});
+  rows.forEach(r=>{
+    state.commissions.push({ id: uid('cm'), employeeId: r.employeeId, type: 'Production', date,
+      remarks: `Production commission share for ${monthLabel} — ${r.hours.toFixed(2)} hrs worked`, amount: r.share, claimed:false });
+  });
+  markDirty(); closeModal(); renderCommTable();
+  toast(`Logged Production commission shares for ${rows.length} employee${rows.length===1?'':'s'} (${monthLabel}).`);
 }
 function toggleCommClaimed(id, val){ const c = state.commissions.find(x=>x.id===id); c.claimed = val; markDirty(); }
 function deleteCommission(id){ state.commissions = state.commissions.filter(x=>x.id!==id); markDirty(); renderCommTable(); }
@@ -2348,6 +2461,7 @@ function renderReports(root){
   <div class="subtabs no-print">
     <button class="subtab ${reportTab==='late'?'active':''}" data-t="late">Late Rankings</button>
     <button class="subtab ${reportTab==='ytd'?'active':''}" data-t="ytd">YTD Summary</button>
+    <button class="subtab ${reportTab==='annual'?'active':''}" data-t="annual">Annual Report</button>
     <button class="subtab ${reportTab==='run'?'active':''}" data-t="run">Payroll Run Summary</button>
     <button class="subtab ${reportTab==='deductions'?'active':''}" data-t="deductions">Deductions Summary</button>
     <button class="subtab ${reportTab==='timesheet'?'active':''}" data-t="timesheet">Time Sheet</button>
@@ -2357,6 +2471,7 @@ function renderReports(root){
   const body = document.getElementById('reportBody');
   if(reportTab==='late') renderLateReport(body);
   else if(reportTab==='ytd') renderYtdReport(body);
+  else if(reportTab==='annual') renderAnnualReport(body);
   else if(reportTab==='deductions') renderDeductionsReport(body);
   else if(reportTab==='timesheet') renderTimesheetReport(body);
   else renderRunSummaryReport(body);
@@ -2432,6 +2547,123 @@ function renderYtdTable(){
   ${rows.map(r=>`<tr><td>${esc(r.name)}</td><td class="num">${peso(r.payroll)}</td><td class="num">${peso(r.licCommission)}</td><td class="num">${peso(r.fivejsCommission)}</td><td class="num" style="font-weight:700;">${peso(r.earnings)}</td><td class="num">${peso(r.deductions)}</td><td class="num">${peso(r.takeHome)}</td></tr>`).join('')}
   </tbody><tfoot><tr style="font-weight:700;background:#fafbfc;"><td>GRAND TOTAL</td><td class="num">${peso(grand.payroll)}</td><td class="num">${peso(grand.licCommission)}</td><td class="num">${peso(grand.fivejsCommission)}</td><td class="num">${peso(grand.earnings)}</td><td class="num">${peso(grand.deductions)}</td><td class="num">${peso(grand.takeHome)}</td></tr></tfoot></table>
   ${rows.length===0?'<div class="empty-state">No payroll or commission data for this year yet.</div>':''}`;
+}
+// ---- Annual Report: every earnings category, totalled per employee for the whole year ----
+// This mirrors the "2026" tab in the user's old Excel workbook — but that sheet was just a flat
+// log (one row per employee per pay period, ~24 rows/employee/year); this totals every one of
+// those earnings columns into a single annual row per employee, plus a grand total row.
+function renderAnnualReport(root){
+  const years = Array.from(new Set(state.runs.map(r=>new Date(r.periodEnd).getFullYear()))).sort((a,b)=>b-a);
+  const year = years[0] || new Date().getFullYear();
+  root.innerHTML = `<div class="section"><div class="section-head">
+    <div><h3>Annual Report</h3><div class="desc">Every earnings category totalled per employee for the year — Regular Hours through Adjustments, plus 5JS/LIC/Production commission from the Commission Log — plus TIN, statutory contributions, and a taxable/non-taxable compensation split for BIR withholding tax filing (Alphalist / 1604-C / 2316).</div></div>
+    <div class="flexrow no-print">
+      <select id="ann_year">${(years.length?years:[year]).map(y=>`<option value="${y}">${y}</option>`).join('')}</select>
+      <button class="btn" onclick="exportAnnualReportCSV()">⬇ Export CSV</button>
+    </div>
+  </div><div class="section-body">
+  <div class="helpbox warn">Non-Taxable Compensation here = SSS + PhilHealth + Pag-IBIG employee contributions actually withheld, plus 13th Month Pay capped at ₱90,000 (the standard "13th month pay and other benefits" exemption). It does NOT include any other de minimis benefits (rice/uniform/medical allowance, etc.) since those aren't tracked separately in this app — if any apply, add them in yourself before filing. This is a computation aid, not tax advice; verify against current BIR rules or your accountant before filing, and note this app does not compute actual withholding tax due.</div>
+  <div id="annWrap" class="table-wrap"></div></div></div>`;
+  document.getElementById('ann_year').addEventListener('change', renderAnnualTable);
+  renderAnnualTable();
+}
+function computeAnnualTotals(year){
+  const totals = {};
+  const ensure = (emp) => {
+    if(!totals[emp.id]) totals[emp.id] = { name: emp.name, position: emp.position, tin: emp.tin || '',
+      regularHrs:0, lateMin:0, basicSalary:0, restDayHrs:0, restDayPay:0, otHrs:0, otPay:0,
+      holidayDays:0, holidayPay:0, fivejsCommission:0, licCommission:0, productionCommission:0,
+      otherCommission:0, thirteenthMonth:0, allowance:0, incentiveLeave:0, adjustment:0,
+      sss:0, philhealth:0, pagibig:0 };
+    return totals[emp.id];
+  };
+  state.runs.forEach(r=>{
+    if(new Date(r.periodEnd).getFullYear() !== year) return;
+    r.entries.forEach(en=>{
+      const emp = empById(en.employeeId); if(!emp) return;
+      const c = calcEntry(emp, en, r);
+      const t = ensure(emp);
+      t.regularHrs += num(en.hoursWorked); t.lateMin += num(en.lateMinutes); t.basicSalary += c.basicSalary;
+      t.restDayHrs += num(en.restDayHours); t.restDayPay += c.restDayPay;
+      t.otHrs += num(en.otHours); t.otPay += c.otPay;
+      t.holidayDays += num(en.holidayDays); t.holidayPay += c.holidayPay;
+      t.thirteenthMonth += num(en.thirteenthMonth); t.allowance += c.allowance;
+      t.incentiveLeave += c.incentiveLeavePay; t.adjustment += num(en.adjustment);
+      t.sss += c.sss; t.philhealth += c.philhealth; t.pagibig += c.pagibig;
+    });
+  });
+  state.commissions.forEach(cm=>{
+    if(!cm.date) return;
+    if(new Date(cm.date).getFullYear() !== year) return;
+    const emp = empById(cm.employeeId); if(!emp) return;
+    const t = ensure(emp);
+    const type = (cm.type||'').toUpperCase();
+    if(type === 'LIC') t.licCommission += num(cm.amount);
+    else if(type === '5JS') t.fivejsCommission += num(cm.amount);
+    else if(type === 'PRODUCTION') t.productionCommission += num(cm.amount);
+    else t.otherCommission += num(cm.amount);
+  });
+  // For BIR withholding tax filing: SSS/PhilHealth/Pag-IBIG employee contributions are always
+  // non-taxable, and 13th Month Pay is non-taxable up to ₱90,000 (the standard exemption cap for
+  // "13th month pay and other benefits"). This does NOT account for other de minimis benefits
+  // (rice/uniform/medical allowance, etc.) since this app doesn't track those as a separate
+  // category — see the caveat helpbox above the table. This is an aid, not authoritative tax
+  // advice; actual withholding tax due still needs to be computed against current BIR tables.
+  const rows = Object.values(totals).map(t => {
+    const totalEarnings = t.basicSalary + t.restDayPay + t.otPay + t.holidayPay + t.fivejsCommission +
+      t.licCommission + t.productionCommission + t.otherCommission + t.thirteenthMonth +
+      t.allowance + t.incentiveLeave + t.adjustment;
+    const nonTaxableComp = t.sss + t.philhealth + t.pagibig + Math.min(90000, t.thirteenthMonth);
+    const taxableComp = Math.max(0, totalEarnings - nonTaxableComp);
+    return { ...t, totalEarnings, nonTaxableComp, taxableComp };
+  }).sort((a,b)=> b.totalEarnings - a.totalEarnings);
+  return rows;
+}
+function renderAnnualTable(){
+  const wrap = document.getElementById('annWrap'); if(!wrap) return;
+  const year = Number(document.getElementById('ann_year').value);
+  const rows = computeAnnualTotals(year);
+  const sum = (k) => rows.reduce((a,r)=>a+r[k],0);
+  wrap.innerHTML = `<table><thead><tr>
+    <th>Employee</th><th>TIN</th><th class="num">Regular Hrs</th><th class="num">Late (min)</th><th class="num">Basic Salary</th>
+    <th class="num">Rest Day Hrs</th><th class="num">Rest Day Pay</th><th class="num">OT Hrs</th><th class="num">OT Pay</th>
+    <th class="num">Holiday Days</th><th class="num">Holiday Pay</th><th class="num">5JS Commission</th><th class="num">LIC Commission</th>
+    <th class="num">Production Commission</th><th class="num">Other Commission</th><th class="num">13th Month</th>
+    <th class="num">Allowance</th><th class="num">Incentive Leave</th><th class="num">Adjustment</th><th class="num">TOTAL EARNINGS</th>
+    <th class="num">SSS</th><th class="num">PhilHealth</th><th class="num">Pag-IBIG</th><th class="num">Non-Taxable Comp.</th><th class="num">Taxable Comp.</th>
+  </tr></thead><tbody>
+  ${rows.map(r=>`<tr><td>${esc(r.name)}</td><td>${esc(r.tin)}</td><td class="num">${r.regularHrs.toFixed(2)}</td><td class="num">${r.lateMin.toFixed(0)}</td><td class="num">${peso(r.basicSalary)}</td>
+    <td class="num">${r.restDayHrs.toFixed(2)}</td><td class="num">${peso(r.restDayPay)}</td><td class="num">${r.otHrs.toFixed(2)}</td><td class="num">${peso(r.otPay)}</td>
+    <td class="num">${r.holidayDays}</td><td class="num">${peso(r.holidayPay)}</td><td class="num">${peso(r.fivejsCommission)}</td><td class="num">${peso(r.licCommission)}</td>
+    <td class="num">${peso(r.productionCommission)}</td><td class="num">${peso(r.otherCommission)}</td><td class="num">${peso(r.thirteenthMonth)}</td>
+    <td class="num">${peso(r.allowance)}</td><td class="num">${peso(r.incentiveLeave)}</td><td class="num">${peso(r.adjustment)}</td><td class="num" style="font-weight:700;">${peso(r.totalEarnings)}</td>
+    <td class="num">${peso(r.sss)}</td><td class="num">${peso(r.philhealth)}</td><td class="num">${peso(r.pagibig)}</td><td class="num">${peso(r.nonTaxableComp)}</td><td class="num" style="font-weight:700;">${peso(r.taxableComp)}</td></tr>`).join('')}
+  </tbody><tfoot><tr style="font-weight:700;background:#fafbfc;">
+    <td>GRAND TOTAL</td><td></td><td class="num">${sum('regularHrs').toFixed(2)}</td><td class="num">${sum('lateMin').toFixed(0)}</td><td class="num">${peso(sum('basicSalary'))}</td>
+    <td class="num">${sum('restDayHrs').toFixed(2)}</td><td class="num">${peso(sum('restDayPay'))}</td><td class="num">${sum('otHrs').toFixed(2)}</td><td class="num">${peso(sum('otPay'))}</td>
+    <td class="num">${sum('holidayDays')}</td><td class="num">${peso(sum('holidayPay'))}</td><td class="num">${peso(sum('fivejsCommission'))}</td><td class="num">${peso(sum('licCommission'))}</td>
+    <td class="num">${peso(sum('productionCommission'))}</td><td class="num">${peso(sum('otherCommission'))}</td><td class="num">${peso(sum('thirteenthMonth'))}</td>
+    <td class="num">${peso(sum('allowance'))}</td><td class="num">${peso(sum('incentiveLeave'))}</td><td class="num">${peso(sum('adjustment'))}</td><td class="num">${peso(sum('totalEarnings'))}</td>
+    <td class="num">${peso(sum('sss'))}</td><td class="num">${peso(sum('philhealth'))}</td><td class="num">${peso(sum('pagibig'))}</td><td class="num">${peso(sum('nonTaxableComp'))}</td><td class="num">${peso(sum('taxableComp'))}</td>
+  </tr></tfoot></table>
+  ${rows.length===0?'<div class="empty-state">No payroll data for this year yet.</div>':''}`;
+}
+function exportAnnualReportCSV(){
+  const year = Number(document.getElementById('ann_year').value);
+  const rows = computeAnnualTotals(year);
+  const header = ['Name','TIN','Position','Regular Hrs','Late Min','Basic Salary','Rest Day Hrs','Rest Day Pay','OT Hrs','OT Pay',
+    'Holiday Days','Holiday Pay','5JS Commission','LIC Commission','Production Commission','Other Commission','13th Month',
+    'Allowance','Incentive Leave','Adjustment','Total Earnings','SSS','PhilHealth','Pag-IBIG','Non-Taxable Compensation','Taxable Compensation'];
+  const lines = [header.join(',')];
+  rows.forEach(r=>{
+    const row = [r.name, r.tin, r.position, r.regularHrs.toFixed(2), r.lateMin.toFixed(0), r.basicSalary.toFixed(2), r.restDayHrs.toFixed(2),
+      r.restDayPay.toFixed(2), r.otHrs.toFixed(2), r.otPay.toFixed(2), r.holidayDays, r.holidayPay.toFixed(2), r.fivejsCommission.toFixed(2),
+      r.licCommission.toFixed(2), r.productionCommission.toFixed(2), r.otherCommission.toFixed(2), r.thirteenthMonth.toFixed(2),
+      r.allowance.toFixed(2), r.incentiveLeave.toFixed(2), r.adjustment.toFixed(2), r.totalEarnings.toFixed(2),
+      r.sss.toFixed(2), r.philhealth.toFixed(2), r.pagibig.toFixed(2), r.nonTaxableComp.toFixed(2), r.taxableComp.toFixed(2)];
+    lines.push(row.map(v => `"${String(v).replace(/"/g,'""')}"`).join(','));
+  });
+  downloadText(lines.join('\n'), `Annual_Report_${year}.csv`, 'text/csv');
 }
 function renderRunSummaryReport(root){
   const runs = [...state.runs].sort((a,b)=> new Date(b.periodEnd)-new Date(a.periodEnd));
