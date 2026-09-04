@@ -1356,6 +1356,7 @@ function renderRunDetail(){
         ${isLastCutoffOfMonth(run) ? `<button class="btn" onclick="autoCalcStatutory('${run.id}')" title="Combines this cutoff's basic salary with the 1st–15th cutoff, looks up SSS from the bracket table, and carries forward PhilHealth/Pag-IBIG from the last payday">🧮 Auto-Calc SSS/PhilHealth/Pag-IBIG</button>` : ''}
         <button class="btn" onclick="syncLoanDeductionsForRun('${run.id}')" title="Replaces each employee's Loan/Cash Advance deduction with whatever is actually scheduled for this exact Pay Date — so a monthly-only loan (e.g. Pag-IBIG) doesn't get deducted on a cutoff it isn't due">🔄 Sync Loan Deductions</button>
         <button class="btn" onclick="exportRunCSV()">⬇ Export CSV</button>
+        <button class="btn" onclick="openDisbursementList('${run.id}')" title="A focused list of who to pay, how (GCash/Bank/Cash), the account number, and how much — for actually sending out this cutoff's salaries">💸 Disbursement List</button>
         <button class="btn btn-primary" onclick="currentPage='payslips';render()">🧾 View Payslips</button>
       </div>
     </div>
@@ -1887,6 +1888,72 @@ function exportRunCSV(){
     lines.push(row.map(v => `"${String(v).replace(/"/g,'""')}"`).join(','));
   });
   downloadText(lines.join('\n'), `Payroll_${run.periodStart}_to_${run.periodEnd}.csv`, 'text/csv');
+}
+// ---- Disbursement List: a focused "who to pay, how, and how much" view for actually sending
+// out a cutoff's salaries — grouped by payment method (GCash / Bank / Cash) instead of buried in
+// the last two columns of the full CSV export, with a checkbox to tick off each payment as sent.
+function disbursementRows(run){
+  return sortEntriesByName(run.entries).map(en=>{
+    const emp = empById(en.employeeId); if(!emp) return null;
+    const c = calcEntry(emp, en, run);
+    return { emp, en, c, method: emp.paymentMethod || 'cash', account: emp.gcashNo || emp.bankAcct || '' };
+  }).filter(Boolean);
+}
+function openDisbursementList(runId){
+  const run = state.runs.find(r=>r.id===runId);
+  if(!run) return;
+  const body = `<div id="disbWrap"></div>`;
+  const foot = `<button class="btn" onclick="closeModal()">Close</button>
+    <button class="btn" onclick="window.print()">🖨 Print</button>
+    <button class="btn btn-primary" onclick="exportDisbursementCSV('${runId}')">⬇ Export CSV</button>`;
+  openModal(`💸 Disbursement List — ${fmtDate(run.periodStart)} – ${fmtDate(run.periodEnd)}`, body, foot, {wide:true});
+  renderDisbursementList(runId);
+}
+function renderDisbursementList(runId){
+  const run = state.runs.find(r=>r.id===runId);
+  const wrap = document.getElementById('disbWrap'); if(!run || !wrap) return;
+  const rows = disbursementRows(run);
+  const order = ['gcash','bank','cash'];
+  const labels = { gcash: '📱 GCash', bank: '🏦 Bank Transfer', cash: '💵 Cash' };
+  let grand = 0, grandPaid = 0;
+  const sections = order.map(method => {
+    const list = rows.filter(r=>r.method===method);
+    if(!list.length) return '';
+    const subtotal = list.reduce((a,r)=>a+r.c.takeHome,0);
+    grand += subtotal;
+    grandPaid += list.filter(r=>r.en.disbursed===true).reduce((a,r)=>a+r.c.takeHome,0);
+    return `<div style="margin-bottom:16px;">
+      <h4 style="margin:0 0 6px;">${labels[method]} (${list.length})</h4>
+      <table><thead><tr><th>Employee</th><th>${method==='cash'?'':'Account No.'}</th><th class="num">Take-Home</th><th>Paid?</th></tr></thead><tbody>
+      ${list.map(r=>`<tr>
+        <td>${esc(r.emp.name)}</td>
+        <td>${method==='cash' ? '—' : (r.account ? esc(r.account) : '<span class="muted">No account on file</span>')}</td>
+        <td class="num" style="font-weight:600;">${peso(r.c.takeHome)}</td>
+        <td><label class="checkline"><input type="checkbox" ${r.en.disbursed===true?'checked':''} onchange="toggleDisbursed('${runId}','${r.emp.id}',this.checked)"></label></td>
+      </tr>`).join('')}
+      </tbody><tfoot><tr style="font-weight:700;background:#fafbfc;"><td colspan="2">Subtotal</td><td class="num">${peso(subtotal)}</td><td></td></tr></tfoot></table>
+    </div>`;
+  }).join('');
+  wrap.innerHTML = `
+    <div class="helpbox">Total to disburse this cutoff: <b>${peso(grand)}</b> — ${peso(grandPaid)} marked paid so far.</div>
+    ${sections || '<div class="empty-state">No employees in this run.</div>'}`;
+}
+function toggleDisbursed(runId, empId, val){
+  const run = state.runs.find(r=>r.id===runId); if(!run) return;
+  const en = run.entries.find(e=>e.employeeId===empId); if(!en) return;
+  en.disbursed = val;
+  markDirty(); renderDisbursementList(runId);
+}
+function exportDisbursementCSV(runId){
+  const run = state.runs.find(r=>r.id===runId); if(!run) return;
+  const rows = disbursementRows(run);
+  const header = ['Employee','Payment Method','Account No.','Take-Home','Paid?'];
+  const lines = [header.join(',')];
+  rows.forEach(r=>{
+    lines.push([r.emp.name, r.method, r.account, r.c.takeHome.toFixed(2), r.en.disbursed===true?'Yes':'No']
+      .map(v=>`"${String(v).replace(/"/g,'""')}"`).join(','));
+  });
+  downloadText(lines.join('\n'), `Disbursement_${run.periodStart}_to_${run.periodEnd}.csv`, 'text/csv');
 }
 function downloadText(text, filename, type){
   const blob = new Blob([text], {type});
