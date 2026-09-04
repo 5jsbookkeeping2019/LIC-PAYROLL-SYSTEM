@@ -200,7 +200,7 @@ small.hint{display:block;color:var(--ink-soft);font-size:11.5px;margin-top:3px;}
 
 <div id="loginScreen" style="position:fixed;inset:0;background:#0f2e1c;display:flex;align-items:center;justify-content:center;z-index:9999;">
   <div style="background:#fff;border-radius:12px;padding:36px;width:100%;max-width:360px;box-shadow:0 10px 40px rgba(0,0,0,.35);">
-    <h2 style="margin:0 0 4px;">LIC Printing Shop</h2>
+    <h2 style="margin:0 0 4px;">LIC Printing Corporation</h2>
     <div id="loginSubtitle" style="color:#666;font-size:13px;margin-bottom:18px;">Sign in to access payroll</div>
     <div style="display:flex;gap:8px;margin-bottom:18px;">
       <button type="button" id="roleTabAdmin" onclick="setLoginRole('admin')" style="flex:1;padding:9px;border-radius:7px;border:1px solid var(--line);font-weight:600;font-size:13px;cursor:pointer;">🔒 Admin</button>
@@ -286,7 +286,7 @@ const STARTER_LOANS = [{"id": "ln_cristina_grant", "employeeId": "emp_018_11", "
 function defaultState(){
   return {
     company: {
-      name: "LIC PRINTING SHOP",
+      name: "LIC PRINTING CORPORATION",
       address: "137 Boni Avenue Brgy. San Jose, Mandaluyong City",
       phone: "02 8531-9583 / 0943-4164978 / 0916-5968564",
       email: "licinternetcafe@yahoo.com",
@@ -983,12 +983,13 @@ function editEmployee(id){
     <div class="field"><label>Pag-IBIG No.</label><input id="f_pagibigNo" value="${esc(e.pagibigNo||'')}">
       <label class="checkline" style="margin-top:4px;"><input type="checkbox" id="f_pagibigExempt" ${e.pagibigExempt===true?'checked':''}> Don't deduct Pag-IBIG</label></div>
     <div class="field"><label>Payment Method</label>
-      <select id="f_paymentMethod">
+      <select id="f_paymentMethod" onchange="document.getElementById('f_bankName_wrap').style.display = this.value==='bank' ? '' : 'none';">
         <option value="cash" ${e.paymentMethod==='cash'?'selected':''}>Cash</option>
         <option value="gcash" ${e.paymentMethod==='gcash'?'selected':''}>GCash</option>
         <option value="bank" ${e.paymentMethod==='bank'?'selected':''}>Bank</option>
       </select>
     </div>
+    <div class="field" id="f_bankName_wrap" style="${e.paymentMethod==='bank'?'':'display:none;'}"><label>Bank Name</label><input id="f_bankName" value="${esc(e.bankName||'')}" placeholder="e.g. BDO, BPI, Metrobank"></div>
     <div class="field"><label>GCash No. / Bank Acct.</label><input id="f_gcashNo" value="${esc(e.gcashNo||e.bankAcct||'')}"></div>
     <div class="field"><label>Work Schedule From</label><input id="f_schedFrom" type="time" value="${esc(e.schedFrom||'08:00')}"></div>
     <div class="field"><label>Work Schedule To</label><input id="f_schedTo" type="time" value="${esc(e.schedTo||'17:00')}"></div>
@@ -1085,6 +1086,7 @@ function saveEmployee(id, isNew){
     dateHired: get('f_dateHired'), endDate: get('f_endDate'), birthday: get('f_birthday'), tin: get('f_tin'), sssNo: get('f_sssNo'),
     philhealthNo: get('f_philhealthNo'), pagibigNo: get('f_pagibigNo'), paymentMethod: get('f_paymentMethod'),
     gcashNo: get('f_gcashNo'), bankAcct: get('f_paymentMethod')==='bank' ? get('f_gcashNo') : '',
+    bankName: get('f_paymentMethod')==='bank' ? get('f_bankName') : '',
     schedFrom: get('f_schedFrom') || '08:00', schedTo: get('f_schedTo') || '17:00',
     sssExempt: document.getElementById('f_sssExempt').checked,
     philhealthExempt: document.getElementById('f_philhealthExempt').checked,
@@ -1874,7 +1876,7 @@ function removeFromRun(empId){
 function exportRunCSV(){
   const run = state.runs.find(r=>r.id===currentRunId);
   if(!run) return;
-  const header = ['Name','Position','Rate/Day','Hours Worked','Late Min','OT Hrs','OT Form?','Rest Day Hrs','Holiday Days','Commission','Log Commission (LIC/Prod)','13th Month','Incentive Leave Days','Incentive Leave Pay','Allowance','Adjustment','Total Earnings','SSS','PhilHealth','Pag-IBIG','Late Ded.','Loan','Cash Advance','Other Ded.','Total Deductions','Take-Home','Payment Method','Account'];
+  const header = ['Name','Position','Rate/Day','Hours Worked','Late Min','OT Hrs','OT Form?','Rest Day Hrs','Holiday Days','Commission','Log Commission (LIC/Prod)','13th Month','Incentive Leave Days','Incentive Leave Pay','Allowance','Adjustment','Total Earnings','SSS','PhilHealth','Pag-IBIG','Late Ded.','Loan','Cash Advance','Other Ded.','Total Deductions','Take-Home','Payment Method','Bank Name','Account'];
   const lines = [header.join(',')];
   run.entries.forEach(en=>{
     const emp = empById(en.employeeId); if(!emp) return;
@@ -1884,7 +1886,7 @@ function exportRunCSV(){
       en.commission, c.logCommission.toFixed(2), en.thirteenthMonth, (en.incentiveLeaveDays||0), c.incentiveLeavePay.toFixed(2), allowance, en.adjustment, c.totalEarnings.toFixed(2),
       c.sss.toFixed(2), c.philhealth.toFixed(2), c.pagibig.toFixed(2), c.lateDeduction.toFixed(2), c.loanDeduction.toFixed(2),
       c.cashAdvanceDeduction.toFixed(2), c.otherDeduction.toFixed(2), c.totalDeductions.toFixed(2), c.takeHome.toFixed(2),
-      emp.paymentMethod, (emp.gcashNo||emp.bankAcct||'')];
+      emp.paymentMethod, (emp.paymentMethod==='bank' ? (emp.bankName||'') : ''), (emp.gcashNo||emp.bankAcct||'')];
     lines.push(row.map(v => `"${String(v).replace(/"/g,'""')}"`).join(','));
   });
   downloadText(lines.join('\n'), `Payroll_${run.periodStart}_to_${run.periodEnd}.csv`, 'text/csv');
@@ -1924,14 +1926,15 @@ function renderDisbursementList(runId){
     grandPaid += list.filter(r=>r.en.disbursed===true).reduce((a,r)=>a+r.c.takeHome,0);
     return `<div style="margin-bottom:16px;">
       <h4 style="margin:0 0 6px;">${labels[method]} (${list.length})</h4>
-      <table><thead><tr><th>Employee</th><th>${method==='cash'?'':'Account No.'}</th><th class="num">Take-Home</th><th>Paid?</th></tr></thead><tbody>
+      <table><thead><tr><th>Employee</th>${method==='bank' ? '<th>Bank</th>' : ''}<th>${method==='cash'?'':'Account No.'}</th><th class="num">Take-Home</th><th>Paid?</th></tr></thead><tbody>
       ${list.map(r=>`<tr>
         <td>${esc(r.emp.name)}</td>
+        ${method==='bank' ? `<td>${r.emp.bankName ? esc(r.emp.bankName) : '<span class="muted">No bank on file</span>'}</td>` : ''}
         <td>${method==='cash' ? '—' : (r.account ? esc(r.account) : '<span class="muted">No account on file</span>')}</td>
         <td class="num" style="font-weight:600;">${peso(r.c.takeHome)}</td>
         <td><label class="checkline"><input type="checkbox" ${r.en.disbursed===true?'checked':''} onchange="toggleDisbursed('${runId}','${r.emp.id}',this.checked)"></label></td>
       </tr>`).join('')}
-      </tbody><tfoot><tr style="font-weight:700;background:#fafbfc;"><td colspan="2">Subtotal</td><td class="num">${peso(subtotal)}</td><td></td></tr></tfoot></table>
+      </tbody><tfoot><tr style="font-weight:700;background:#fafbfc;"><td colspan="${method==='bank'?3:2}">Subtotal</td><td class="num">${peso(subtotal)}</td><td></td></tr></tfoot></table>
     </div>`;
   }).join('');
   wrap.innerHTML = `
@@ -1947,10 +1950,10 @@ function toggleDisbursed(runId, empId, val){
 function exportDisbursementCSV(runId){
   const run = state.runs.find(r=>r.id===runId); if(!run) return;
   const rows = disbursementRows(run);
-  const header = ['Employee','Payment Method','Account No.','Take-Home','Paid?'];
+  const header = ['Employee','Payment Method','Bank Name','Account No.','Take-Home','Paid?'];
   const lines = [header.join(',')];
   rows.forEach(r=>{
-    lines.push([r.emp.name, r.method, r.account, r.c.takeHome.toFixed(2), r.en.disbursed===true?'Yes':'No']
+    lines.push([r.emp.name, r.method, (r.method==='bank' ? (r.emp.bankName||'') : ''), r.account, r.c.takeHome.toFixed(2), r.en.disbursed===true?'Yes':'No']
       .map(v=>`"${String(v).replace(/"/g,'""')}"`).join(','));
   });
   downloadText(lines.join('\n'), `Disbursement_${run.periodStart}_to_${run.periodEnd}.csv`, 'text/csv');
