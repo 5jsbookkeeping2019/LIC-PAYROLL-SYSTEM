@@ -1370,9 +1370,9 @@ function ensureTimesheet(en, run, emp){
   const dates = generatePeriodDates(run);
   const existing = {};
   (en.timesheet||[]).forEach(d=>{ existing[d.date] = d; });
-  en.timesheet = dates.map(date => existing[date] || {date, timeIn:'', lunchOut:'', lunchIn:'', timeOut:'', otHours:0, remarks:'', schedFrom:'', schedTo:''});
+  en.timesheet = dates.map(date => existing[date] || {date, timeIn:'', lunchOut:'', lunchIn:'', timeOut:'', otHours:0, remarks:'', schedFrom:'', schedTo:'', isProduction:false});
   // Older saved timesheets won't have these per-day fields yet — backfill so they exist.
-  en.timesheet.forEach(d=>{ if(d.schedFrom===undefined) d.schedFrom=''; if(d.schedTo===undefined) d.schedTo=''; });
+  en.timesheet.forEach(d=>{ if(d.schedFrom===undefined) d.schedFrom=''; if(d.schedTo===undefined) d.schedTo=''; if(d.isProduction===undefined) d.isProduction=false; });
   if(en.schedFrom === undefined) en.schedFrom = (emp && emp.schedFrom) || '08:00';
   if(en.schedTo === undefined) en.schedTo = (emp && emp.schedTo) || '17:00';
 }
@@ -1426,6 +1426,7 @@ function renderTimesheetModal(empId){
       <td class="num" title="${lateMinutes>0 ? 'Voided — he was late this day' : ''}">${isRestDay ? '—' : otHours.toFixed(2)}</td>
       <td class="num" title="${isRestDay ? 'Saturday/Sunday work — counted as Rest Day, not regular hours' : ''}">${isRestDay ? hoursWorked.toFixed(2) : '—'}</td>
       <td><input type="text" data-idx="${idx}" data-field="remarks" value="${esc(day.remarks)}" placeholder="e.g. Rest Day"  onchange="updTimesheetDay('${empId}',${idx},'remarks',this.value)"></td>
+      <td style="text-align:center;"><input type="checkbox" data-idx="${idx}" data-field="isProduction" ${day.isProduction ? 'checked' : ''} title="Check only for a day this person actually worked in the Production Department (e.g. Alfie helping out that day)." onchange="updTimesheetDay('${empId}',${idx},'isProduction',this.checked)"></td>
     </tr>`;
   }).join('');
   const body = `
@@ -1434,15 +1435,15 @@ function renderTimesheetModal(empId){
       <div class="field"><label>Work Schedule From (period default)</label><input type="time" data-field="schedFromDefault" value="${en.schedFrom}" onchange="updTimesheetSched('${empId}','schedFrom',this.value)"></div>
       <div class="field"><label>Work Schedule To (period default)</label><input type="time" data-field="schedToDefault" value="${en.schedTo}" onchange="updTimesheetSched('${empId}','schedTo',this.value)"></div>
     </div>
-    <div class="helpbox">Hours Worked, Late, and OT are all computed automatically from Time In / Time Out vs. the Work Schedule. OT past the Schedule To time only counts once at least a full hour has actually been rendered (under 60 minutes earns 0), then rounds to the nearest 30-minute block, and is voided to 0 entirely on any day he clocked in late — staying late doesn't earn OT if he starts late that day. Clocking in early only earns OT in full whole hours (1 hour, 2 hours, 3 hours...) — any leftover minutes that don't complete another full hour are dropped, and anything under a full hour early counts toward neither OT nor Hours Worked at all. Any day worked that falls on a Saturday or Sunday (highlighted below) is counted entirely as Rest Day hours instead — it's kept out of regular Hours Worked/Late/OT and paid at the Rest Day rate instead. If someone works a different shift on specific days (e.g. 1:00 PM–10:00 PM instead of their usual schedule), set that day's Sched In/Out columns (highlighted blue below) — leave them blank on every other day to keep using the period default above. This is saved with the payroll run, but only affects pay once you click "Apply Totals to Payroll Entry" below (and OT still isn't actually paid until the "OT Form?" box is checked on the payroll entry).</div>
+    <div class="helpbox">Hours Worked, Late, and OT are all computed automatically from Time In / Time Out vs. the Work Schedule. OT past the Schedule To time only counts once at least a full hour has actually been rendered (under 60 minutes earns 0), then rounds to the nearest 30-minute block, and is voided to 0 entirely on any day he clocked in late — staying late doesn't earn OT if he starts late that day. Clocking in early only earns OT in full whole hours (1 hour, 2 hours, 3 hours...) — any leftover minutes that don't complete another full hour are dropped, and anything under a full hour early counts toward neither OT nor Hours Worked at all. Any day worked that falls on a Saturday or Sunday (highlighted below) is counted entirely as Rest Day hours instead — it's kept out of regular Hours Worked/Late/OT and paid at the Rest Day rate instead. If someone works a different shift on specific days (e.g. 1:00 PM–10:00 PM instead of their usual schedule), set that day's Sched In/Out columns (highlighted blue below) — leave them blank on every other day to keep using the period default above. This is saved with the payroll run, but only affects pay once you click "Apply Totals to Payroll Entry" below (and OT still isn't actually paid until the "OT Form?" box is checked on the payroll entry). Check the "Production?" box only on a day this person actually worked in the Production Department (e.g. Alfie helping out there) — this is what the Compute Production Commission Split tool (in Commissions) uses to know which of his hours count, instead of guessing from the Remarks text.</div>
     <div class="table-wrap">
     <table class="ts-table">
-      <thead><tr><th>Date</th><th>Sched In</th><th>Sched Out</th><th>Time In</th><th>Lunch Out</th><th>Lunch In</th><th>Time Out</th><th class="num">Hrs Worked</th><th class="num">Late (min)</th><th class="num">OT Hrs</th><th class="num">Rest Day Hrs</th><th>Remarks</th></tr></thead>
+      <thead><tr><th>Date</th><th>Sched In</th><th>Sched Out</th><th>Time In</th><th>Lunch Out</th><th>Lunch In</th><th>Time Out</th><th class="num">Hrs Worked</th><th class="num">Late (min)</th><th class="num">OT Hrs</th><th class="num">Rest Day Hrs</th><th>Remarks</th><th>Production?</th></tr></thead>
       <tbody>${rows}</tbody>
       <tfoot style="font-weight:700;background:#fafbfc;">
       <tr>
         <td colspan="7">TOTALS (${daysWorked} day${daysWorked===1?'':'s'} worked)</td>
-        <td class="num">${totalHours.toFixed(2)}</td><td class="num">${totalLate.toFixed(0)}</td><td class="num">${totalOt.toFixed(2)}</td><td class="num">${totalRestDay.toFixed(2)}</td><td></td>
+        <td class="num">${totalHours.toFixed(2)}</td><td class="num">${totalLate.toFixed(0)}</td><td class="num">${totalOt.toFixed(2)}</td><td class="num">${totalRestDay.toFixed(2)}</td><td></td><td></td>
       </tr></tfoot>
     </table>
     </div>`;
@@ -1481,7 +1482,7 @@ function updTimesheetDay(empId, idx, field, value){
   const run = state.runs.find(r=>r.id===currentRunId);
   const en = run && run.entries.find(e=>e.employeeId===empId);
   if(!en || !en.timesheet[idx]) return;
-  en.timesheet[idx][field] = (field==='otHours') ? num(value) : value;
+  en.timesheet[idx][field] = (field==='otHours') ? num(value) : (field==='isProduction' ? !!value : value);
   markDirty();
   rerenderTimesheetPreservingFocus(empId);
 }
@@ -2178,10 +2179,10 @@ function computeProductionHoursForMonth(emp, year, month){
     const schedToMin = timeToMinutes(en.schedTo);
     en.timesheet.forEach(day=>{
       if(!day.timeIn || !day.timeOut) return;
-      if(!isProdDept && !/production/i.test(day.remarks||'')) return;
+      if(!isProdDept && day.isProduction !== true) return;
       const daySched = resolveDaySchedule(day, schedFromMin, schedToMin);
-      const { hoursWorked } = computeDayHours(day, daySched.fromMin, daySched.toMin, daySched.isOverride);
-      hours += hoursWorked;
+      const { hoursWorked, otMinutes } = computeDayHours(day, daySched.fromMin, daySched.toMin, daySched.isOverride);
+      hours += hoursWorked + (otMinutes/60);
     });
   });
   return hours;
@@ -2212,7 +2213,7 @@ function addProductionSplitModal(){
     <div class="field"><label>Total Production Commission Pool (₱)</label><input id="ps_pool" type="number" step="0.01" value="0"></div>
     <div class="field"><label>Date to Log</label><input id="ps_date" type="date" value="${todayISO()}"></div>
   </div>
-  <div class="helpbox">Splits the pool proportionally by actual hours worked that month, from each employee's Time Sheet. Production Department employees count every hour worked; anyone else (like Alfie) only counts hours on days whose Time Sheet Remarks mention "production" — the note you already write on those days.</div>
+  <div class="helpbox">Splits the pool proportionally by actual hours worked (including OT) that month, from each employee's Time Sheet. Production Department employees count every hour worked; anyone else (like Alfie) only counts hours on days checked "Production?" in their Time Sheet — open his Time Sheet for this period and check that box on the exact days he actually worked in Production.</div>
   <div id="ps_preview" style="margin-top:10px;"></div>`;
   const foot = `<button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="saveProductionSplit()">Log Commission Shares</button>`;
   openModal("Compute Production Commission Split", body, foot, {wide:true});
@@ -2227,7 +2228,7 @@ function updateProductionSplitPreview(){
   const pool = num(document.getElementById('ps_pool').value);
   if(!y || !m || pool<=0){ prev.innerHTML = '<div class="helpbox">Enter the month and pool amount to preview the split.</div>'; return; }
   const { rows, totalHours } = computeProductionCommissionSplit(y, m, pool);
-  if(!rows.length){ prev.innerHTML = '<div class="helpbox warn">No Production hours found for that month — check that timesheets are filled in and Alfie-style entries have "production" noted in their Remarks.</div>'; return; }
+  if(!rows.length){ prev.innerHTML = '<div class="helpbox warn">No Production hours found for that month — check that timesheets are filled in and Alfie-style entries have the "Production?" box checked on their Time Sheet.</div>'; return; }
   prev.innerHTML = `<table class="ts-table"><thead><tr><th>Employee</th><th class="num">Hours Worked</th><th class="num">Share</th></tr></thead><tbody>
   ${rows.map(r=>`<tr><td>${esc(r.name)}</td><td class="num">${r.hours.toFixed(2)}</td><td class="num">${peso(r.share)}</td></tr>`).join('')}
   </tbody><tfoot><tr style="font-weight:700;background:#fafbfc;"><td>TOTAL</td><td class="num">${totalHours.toFixed(2)}</td><td class="num">${peso(rows.reduce((a,r)=>a+r.share,0))}</td></tr></tfoot></table>`;
