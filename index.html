@@ -639,6 +639,15 @@ function calcEntry(emp, entry, run){
   const incentiveLeavePay = incentiveLeaveDays > 0 ? incentiveLeaveDays * rateDay : num(entry.incentiveLeavePay);
   const allowance = computeAllowance(emp, entry, run);
   const adjustment = num(entry.adjustment);
+  // LIC and Production commissions logged in the Commission Log (Commissions tab) and explicitly
+  // linked to THIS payroll run (via its "Pay Period" dropdown) are pulled in automatically here, so
+  // they don't have to be re-typed by hand into the Commission field below. 5JS commission is
+  // deliberately excluded — 5JS pays that out separately, it's never part of what LIC disburses —
+  // and any commission not linked to a run at all (e.g. old historical log entries) is left alone
+  // too, so nothing gets swept into pay retroactively just because its date happens to fall in range.
+  const logCommission = state.commissions
+    .filter(cm => cm.runId === run.id && cm.employeeId === emp.id && (cm.type === 'LIC' || cm.type === 'Production'))
+    .reduce((a,cm) => a + num(cm.amount), 0);
 
   const basicSalary = hoursWorked * hr;
   const restDayPay = hr * num(state.settings.restDayMultiplier) * restDayHours;
@@ -648,7 +657,7 @@ function calcEntry(emp, entry, run){
   const otPay = otApproved ? hr * num(state.settings.otMultiplier) * otHours : 0;
   const holidayPay = rateDay * holidayDays;
 
-  const totalEarnings = basicSalary + restDayPay + otPay + holidayPay + commission + thirteenthMonth + incentiveLeavePay + allowance + adjustment;
+  const totalEarnings = basicSalary + restDayPay + otPay + holidayPay + commission + logCommission + thirteenthMonth + incentiveLeavePay + allowance + adjustment;
 
   const lateDeduction = (hr/60) * lateMinutes;
   const applyStat = entry.applyStatutory !== false;
@@ -662,7 +671,7 @@ function calcEntry(emp, entry, run){
   const totalDeductions = sss + philhealth + pagibig + lateDeduction + loanDeduction + cashAdvanceDeduction + otherDeduction;
   const takeHome = totalEarnings - totalDeductions;
 
-  return { hourlyRate:hr, basicSalary, restDayPay, otPay, otApproved, holidayPay, incentiveLeaveDays, incentiveLeavePay, allowance, totalEarnings,
+  return { hourlyRate:hr, basicSalary, restDayPay, otPay, otApproved, holidayPay, incentiveLeaveDays, incentiveLeavePay, allowance, logCommission, totalEarnings,
     lateDeduction, sss, philhealth, pagibig, loanDeduction, cashAdvanceDeduction, otherDeduction,
     totalDeductions, takeHome };
 }
@@ -1154,6 +1163,7 @@ const RUN_FILTERS = [
   {id:'ot', label:'OT Hours > 0'},
   {id:'restday', label:'Rest Day Hrs > 0'},
   {id:'commission', label:'Commission > 0'},
+  {id:'logcommission', label:'Log Commission (LIC/Prod) > 0'},
   {id:'allowance', label:'Allowance > 0'},
   {id:'holiday', label:'Holiday Days > 0'},
   {id:'thirteenth', label:'13th Month > 0'},
@@ -1165,6 +1175,7 @@ function runFilterMatch(en, c, filter){
     case 'ot': return num(en.otHours) > 0;
     case 'restday': return num(en.restDayHours) > 0;
     case 'commission': return num(en.commission) > 0;
+    case 'logcommission': return num(c.logCommission) > 0;
     case 'allowance': return num(c.allowance) > 0;
     case 'holiday': return num(en.holidayDays) > 0;
     case 'thirteenth': return num(en.thirteenthMonth) > 0;
@@ -1193,7 +1204,8 @@ function renderRunDetail(){
       <td><label class="checkline" title="Check only if a signed Overtime Request Summary Form is on file"><input type="checkbox" ${en.otApproved===true?'checked':''} onchange="updEntry('${emp.id}','otApproved',this.checked)"></label></td>
       <td><input type="number" step="0.5" value="${en.restDayHours}" onchange="updEntry('${emp.id}','restDayHours',this.value)"></td>
       <td><input type="number" step="1" value="${en.holidayDays}" onchange="updEntry('${emp.id}','holidayDays',this.value)"></td>
-      <td><input type="number" step="0.01" value="${en.commission}" onchange="updEntry('${emp.id}','commission',this.value)"></td>
+      <td><input type="number" step="0.01" value="${en.commission}" onchange="updEntry('${emp.id}','commission',this.value)" title="Manual/ad hoc commission typed directly into this run"></td>
+      <td class="num" title="From LIC/Production Commission Log entries linked to this Pay Period — manage the link from the Commissions tab.">${peso(c.logCommission)}</td>
       <td><input type="number" step="0.01" value="${en.thirteenthMonth}" onchange="updEntry('${emp.id}','thirteenthMonth',this.value)"></td>
       <td><input type="number" step="0.5" value="${en.incentiveLeaveDays||0}" onchange="updEntry('${emp.id}','incentiveLeaveDays',this.value)" title="Days × ${peso(emp.rateDay)}/day = ${peso(c.incentiveLeavePay)}"></td>
       <td><input type="number" step="0.01" placeholder="${emp.allowance}" value="${en.allowanceOverride}" onchange="updEntry('${emp.id}','allowanceOverride',this.value)"></td>
@@ -1239,12 +1251,12 @@ function renderRunDetail(){
       <table>
         <thead><tr>
           <th>Employee</th><th>Hrs Worked</th><th>Late (min)</th><th>OT Hrs</th><th>OT Form?</th><th>Rest Day Hrs</th><th>Holiday Days</th>
-          <th>Commission</th><th>13th Month</th><th>Incentive Leave (Days)</th><th>Allowance</th><th>Adj.</th><th>Total Earnings</th>
+          <th>Commission</th><th>Log Commission<br><span class="muted" style="font-weight:400;">(LIC/Prod)</span></th><th>13th Month</th><th>Incentive Leave (Days)</th><th>Allowance</th><th>Adj.</th><th>Total Earnings</th>
           <th>Apply</th><th>SSS</th><th>PhilHealth</th><th>Pag-IBIG</th><th>Late Ded.</th><th>Loan</th><th>Cash Adv.</th><th>Other Ded.</th><th>Total Ded.</th><th>Take-Home</th><th></th>
         </tr></thead>
-        <tbody>${shownCount>0 ? rows : `<tr><td colspan="23" class="empty-state">No employees match this filter for this run.</td></tr>`}</tbody>
+        <tbody>${shownCount>0 ? rows : `<tr><td colspan="24" class="empty-state">No employees match this filter for this run.</td></tr>`}</tbody>
         <tfoot><tr style="font-weight:700;background:#fafbfc;">
-          <td colspan="12" class="num">TOTALS</td>
+          <td colspan="13" class="num">TOTALS</td>
           <td class="num">${peso(totalEarnings)}</td>
           <td colspan="8"></td>
           <td class="num">${peso(totalDeductions)}</td>
@@ -1739,14 +1751,14 @@ function removeFromRun(empId){
 function exportRunCSV(){
   const run = state.runs.find(r=>r.id===currentRunId);
   if(!run) return;
-  const header = ['Name','Position','Rate/Day','Hours Worked','Late Min','OT Hrs','OT Form?','Rest Day Hrs','Holiday Days','Commission','13th Month','Incentive Leave Days','Incentive Leave Pay','Allowance','Adjustment','Total Earnings','SSS','PhilHealth','Pag-IBIG','Late Ded.','Loan','Cash Advance','Other Ded.','Total Deductions','Take-Home','Payment Method','Account'];
+  const header = ['Name','Position','Rate/Day','Hours Worked','Late Min','OT Hrs','OT Form?','Rest Day Hrs','Holiday Days','Commission','Log Commission (LIC/Prod)','13th Month','Incentive Leave Days','Incentive Leave Pay','Allowance','Adjustment','Total Earnings','SSS','PhilHealth','Pag-IBIG','Late Ded.','Loan','Cash Advance','Other Ded.','Total Deductions','Take-Home','Payment Method','Account'];
   const lines = [header.join(',')];
   run.entries.forEach(en=>{
     const emp = empById(en.employeeId); if(!emp) return;
     const c = calcEntry(emp, en, run);
     const allowance = c.allowance;
     const row = [emp.name, emp.position, emp.rateDay, en.hoursWorked, en.lateMinutes, en.otHours, (en.otApproved===true?'Yes':'No'), en.restDayHours, en.holidayDays,
-      en.commission, en.thirteenthMonth, (en.incentiveLeaveDays||0), c.incentiveLeavePay.toFixed(2), allowance, en.adjustment, c.totalEarnings.toFixed(2),
+      en.commission, c.logCommission.toFixed(2), en.thirteenthMonth, (en.incentiveLeaveDays||0), c.incentiveLeavePay.toFixed(2), allowance, en.adjustment, c.totalEarnings.toFixed(2),
       c.sss.toFixed(2), c.philhealth.toFixed(2), c.pagibig.toFixed(2), c.lateDeduction.toFixed(2), c.loanDeduction.toFixed(2),
       c.cashAdvanceDeduction.toFixed(2), c.otherDeduction.toFixed(2), c.totalDeductions.toFixed(2), c.takeHome.toFixed(2),
       emp.paymentMethod, (emp.gcashNo||emp.bankAcct||'')];
@@ -1840,19 +1852,24 @@ function stepPayslip(dir){
 // since only the log preserves the type breakdown.
 function computeYTDForEmployee(empId, asOfDate){
   const year = new Date(asOfDate).getFullYear();
-  // Total Income for the year = gross earnings from every payroll run entry (this is whatever
-  // Total Earnings already comes out to per calcEntry — deductions are NOT netted out here, so
-  // this is not take-home).
-  let totalIncome = 0;
+  // Gross earnings from every payroll run entry this year (whatever Total Earnings comes out to per
+  // calcEntry — deductions are NOT netted out here, so this isn't take-home). Since LIC/Production
+  // commissions linked to a run now flow straight into that run's Total Earnings (see calcEntry's
+  // logCommission), grossEarnings already includes any of those that have been linked so far.
+  // embeddedCommission tracks exactly how much of that gross is commission that's already been
+  // swept into payroll this way, so it can be backed out precisely below — using the Commission
+  // Log's full-year totals instead would over-subtract for any commission not yet linked to a run.
+  let grossEarnings = 0, embeddedCommission = 0;
   state.runs.forEach(r=>{
     if(new Date(r.periodEnd).getFullYear() !== year) return;
     if(new Date(r.periodEnd) > new Date(asOfDate)) return;
     const en = r.entries.find(e=>e.employeeId===empId);
     if(!en) return;
     const c = calcEntry(empById(empId), en, r);
-    totalIncome += c.totalEarnings;
+    grossEarnings += c.totalEarnings;
+    embeddedCommission += c.logCommission;
   });
-  let licCommission = 0, fivejsCommission = 0;
+  let licCommission = 0, fivejsCommission = 0, productionCommission = 0;
   state.commissions.forEach(cm=>{
     if(cm.employeeId !== empId) return;
     if(!cm.date) return;
@@ -1861,13 +1878,17 @@ function computeYTDForEmployee(empId, asOfDate){
     const t = (cm.type||'').toUpperCase();
     if(t === 'LIC') licCommission += num(cm.amount);
     else if(t === '5JS') fivejsCommission += num(cm.amount);
+    else if(t === 'PRODUCTION') productionCommission += num(cm.amount);
   });
-  // Pure LIC Payroll salary = Total Income minus both commission types — i.e. back out the
-  // LIC/5JS commission (from the Commission Log) that's bundled into Total Income, leaving just
-  // straight payroll salary. By construction, payrollTotal + licCommission + fivejsCommission
-  // always equals totalIncome back out.
-  const payrollTotal = totalIncome - licCommission - fivejsCommission;
-  return { year, payrollTotal, totalIncome, licCommission, fivejsCommission };
+  // Pure LIC Payroll salary = gross payroll earnings minus whatever LIC/Production commission is
+  // actually embedded in it so far (not the full-year Commission Log totals, which may include
+  // commission logged but not yet linked to a payroll run).
+  const payrollTotal = grossEarnings - embeddedCommission;
+  // Total Income = the complete picture the user thinks in: pure payroll salary + LIC commission +
+  // 5JS commission + Production commission for the year, whether or not each has been linked to a
+  // specific payroll run yet.
+  const totalIncome = payrollTotal + licCommission + fivejsCommission + productionCommission;
+  return { year, payrollTotal, totalIncome, licCommission, fivejsCommission, productionCommission };
 }
 
 // Company policy: incentive leave is only earned once an employee has completed a full year of
@@ -1971,7 +1992,8 @@ function payslipHtml(emp, en, run){
       ${c.restDayPay ? `<tr><td>Rest Day Pay</td><td class="num">${peso(c.restDayPay)}</td></tr>`:''}
       ${c.otApproved && c.otPay ? `<tr><td>Overtime</td><td class="num">${peso(c.otPay)}</td></tr>`:''}
       <tr><td>Holiday Pay</td><td class="num">${peso(c.holidayPay)}</td></tr>
-      <tr><td>Commission</td><td class="num">${peso(en.commission)}</td></tr>
+      ${num(en.commission) ? `<tr><td>Commission</td><td class="num">${peso(en.commission)}</td></tr>` : ''}
+      ${c.logCommission ? `<tr><td>LIC/Production Commission</td><td class="num">${peso(c.logCommission)}</td></tr>` : ''}
       <tr><td>13th Month Pay</td><td class="num">${peso(en.thirteenthMonth)}</td></tr>
       <tr><td>Incentive Leave${c.incentiveLeaveDays>0 ? ` (${c.incentiveLeaveDays} day${c.incentiveLeaveDays===1?'':'s'})` : ''}</td><td class="num">${peso(c.incentiveLeavePay)}</td></tr>
       <tr><td>Allowance</td><td class="num">${peso(allowance)}</td></tr>
@@ -2004,6 +2026,7 @@ function payslipHtml(emp, en, run){
       <tr class="divider"><td colspan="2"><div class="hr"></div></td></tr>
       <tr><td>YTD Payroll ${ytd.year}</td><td>${peso(ytd.payrollTotal)}</td></tr>
       <tr><td>YTD LIC Commission ${ytd.year}</td><td>${peso(ytd.licCommission)}</td></tr>
+      ${ytd.productionCommission ? `<tr><td>YTD Production Commission ${ytd.year}</td><td>${peso(ytd.productionCommission)}</td></tr>` : ''}
       <tr><td>YTD 5JS Commission ${ytd.year}</td><td>${peso(ytd.fivejsCommission)}</td></tr>
       <tr><td>YTD Total Income ${ytd.year}</td><td>${peso(ytd.totalIncome)}</td></tr>
     </table>
@@ -2105,6 +2128,20 @@ function saveEditedEntitled(empId, year){
 }
 
 /* ===================== COMMISSIONS ===================== */
+// Builds the "Pay Period" <option> list used to link a Commission Log entry to a specific payroll
+// run, so its amount flows into that run's Total Earnings/Take-Home automatically (see calcEntry's
+// logCommission). Newest period first; blank option means "not linked to any payroll run".
+function payPeriodOptions(selectedRunId){
+  const runs = [...state.runs].sort((a,b)=> new Date(b.periodEnd) - new Date(a.periodEnd));
+  return `<option value="">— Not linked —</option>` +
+    runs.map(r=>`<option value="${r.id}" ${r.id===selectedRunId?'selected':''}>${fmtDate(r.periodStart)} – ${fmtDate(r.periodEnd)}</option>`).join('');
+}
+function setCommissionRun(id, runId){
+  const c = state.commissions.find(x=>x.id===id); if(!c) return;
+  c.runId = runId || null;
+  markDirty(); renderCommTable();
+  toast(runId ? "Linked to payroll run — it will now count toward that run's Total Earnings." : "Unlinked from payroll.");
+}
 let commTypeFilter = 'all';
 function renderCommissions(root){
   root.innerHTML = `
@@ -2135,11 +2172,13 @@ function renderCommTable(){
   if(commTypeFilter !== 'all') list = list.filter(c=>c.type===commTypeFilter);
   const total = list.reduce((s,c)=>s+num(c.amount),0);
   wrap.innerHTML = `
-  <div class="helpbox">${commTypeFilter==='all'?'All types':esc(commTypeFilter)} — ${list.length} entr${list.length===1?'y':'ies'}, total ${peso(total)}</div>
-  <table><thead><tr><th>Date</th><th>Employee</th><th>Type</th><th>Remarks</th><th class="num">Amount</th><th>Claimed</th><th></th></tr></thead><tbody>
+  <div class="helpbox">${commTypeFilter==='all'?'All types':esc(commTypeFilter)} — ${list.length} entr${list.length===1?'y':'ies'}, total ${peso(total)}. LIC and Production entries linked to a Pay Period below automatically count toward that payroll run's Total Earnings — 5JS never does (it's paid separately by 5JS).</div>
+  <table><thead><tr><th>Date</th><th>Employee</th><th>Type</th><th>Remarks</th><th class="num">Amount</th><th>Pay Period (payroll)</th><th>Claimed</th><th></th></tr></thead><tbody>
   ${list.map(c=>{
     const emp = empById(c.employeeId);
+    const canLink = (c.type === 'LIC' || c.type === 'Production');
     return `<tr><td>${fmtDate(c.date)}</td><td>${esc(emp?emp.name:'(deleted)')}</td><td>${esc(c.type)}</td><td class="muted" style="white-space:normal;">${esc(c.remarks||'')}</td><td class="num">${peso(c.amount)}</td>
+    <td>${canLink ? `<select onchange="setCommissionRun('${c.id}',this.value)">${payPeriodOptions(c.runId)}</select>` : `<span class="muted" title="5JS/Other commissions are never included in payroll pay — they're for reporting (YTD/Annual Report) only.">— not applicable —</span>`}</td>
     <td><label class="checkline"><input type="checkbox" ${c.claimed?'checked':''} onchange="toggleCommClaimed('${c.id}',this.checked)"></label></td>
     <td><button class="btn btn-sm btn-danger" onclick="deleteCommission('${c.id}')">✕</button></td></tr>`;
   }).join('')}
@@ -2149,18 +2188,22 @@ function addCommissionModal(){
   const emps = sortByName(activeEmployees());
   const body = `<div class="form-grid cols3">
     <div class="field"><label>Employee</label><select id="cm_emp">${emps.map(e=>`<option value="${e.id}">${esc(e.name)}</option>`).join('')}</select></div>
-    <div class="field"><label>Type</label><select id="cm_type"><option>LIC</option><option>5JS</option><option>Production</option><option>Other</option></select></div>
+    <div class="field"><label>Type</label><select id="cm_type" onchange="const w=document.getElementById('cm_run_wrap'); w.style.display = (this.value==='LIC'||this.value==='Production') ? '' : 'none';"><option>LIC</option><option>5JS</option><option>Production</option><option>Other</option></select></div>
     <div class="field"><label>Amount (₱)</label><input id="cm_amount" type="number" step="0.01" value="0"></div>
     <div class="field"><label>Date</label><input id="cm_date" type="date" value="${todayISO()}"></div>
+    <div class="field" id="cm_run_wrap"><label>Pay Period (payroll run)</label><select id="cm_run">${payPeriodOptions('')}</select></div>
     <div class="field" style="grid-column:1/-1;"><label>Remarks</label><input id="cm_remarks" placeholder="optional"></div>
-  </div>`;
+  </div>
+  <div class="helpbox" style="margin-top:8px;">Linking a LIC or Production commission to a Pay Period automatically adds its amount to that employee's Total Earnings for that payroll run — no need to also type it into the run's Commission field. 5JS is never linked; it's tracked here for reporting only.</div>`;
   const foot = `<button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="saveCommission()">Save</button>`;
   openModal("Add Commission", body, foot);
 }
 function saveCommission(){
-  state.commissions.push({ id: uid('cm'), employeeId: document.getElementById('cm_emp').value, type: document.getElementById('cm_type').value,
+  const type = document.getElementById('cm_type').value;
+  const runId = (type==='LIC'||type==='Production') ? (document.getElementById('cm_run').value || null) : null;
+  state.commissions.push({ id: uid('cm'), employeeId: document.getElementById('cm_emp').value, type,
     amount: num(document.getElementById('cm_amount').value), date: document.getElementById('cm_date').value,
-    remarks: document.getElementById('cm_remarks').value, claimed:false });
+    remarks: document.getElementById('cm_remarks').value, runId, claimed:false });
   markDirty(); closeModal(); renderCommTable();
 }
 // ---- Production Department commission split ----
@@ -2222,8 +2265,9 @@ function addProductionSplitModal(){
     <div class="field"><label>Month</label><input id="ps_month" type="month" value="${defaultMonth}"></div>
     <div class="field"><label>Total Production Commission Pool (₱)</label><input id="ps_pool" type="number" step="0.01" value="0"></div>
     <div class="field"><label>Date to Log</label><input id="ps_date" type="date" value="${todayISO()}"></div>
+    <div class="field" style="grid-column:1/-1;"><label>Pay Period (payroll run to add this to)</label><select id="ps_run">${payPeriodOptions('')}</select></div>
   </div>
-  <div class="helpbox">Splits the pool proportionally by actual hours worked (including OT) that month, from each employee's Time Sheet. Anyone marked "Full-time Production Department employee" on their Employee record counts every hour worked; everyone else (like Alfie) only counts hours on days checked "Production?" in their Time Sheet. If someone's total here looks wrong, check both places: their Employee record's Production checkbox, and the day-by-day "Production?" boxes on their Time Sheet.</div>
+  <div class="helpbox">Splits the pool proportionally by actual hours worked (including OT) that month, from each employee's Time Sheet. Anyone marked "Full-time Production Department employee" on their Employee record counts every hour worked; everyone else (like Alfie) only counts hours on days checked "Production?" in their Time Sheet. If someone's total here looks wrong, check both places: their Employee record's Production checkbox, and the day-by-day "Production?" boxes on their Time Sheet. Pick the Pay Period this pool should be added to — the shares logged here will automatically count toward that payroll run's Total Earnings (you can also change this later from the Commission Log).</div>
   <div id="ps_preview" style="margin-top:10px;"></div>`;
   const foot = `<button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="saveProductionSplit()">Log Commission Shares</button>`;
   openModal("Compute Production Commission Split", body, foot, {wide:true});
@@ -2247,6 +2291,7 @@ function saveProductionSplit(){
   const [y,m] = (document.getElementById('ps_month').value||'').split('-').map(Number);
   const pool = num(document.getElementById('ps_pool').value);
   const date = document.getElementById('ps_date').value;
+  const runId = document.getElementById('ps_run').value || null;
   if(!y||!m){ alert('Pick a month.'); return; }
   if(pool<=0){ alert('Enter the total pool amount.'); return; }
   const { rows } = computeProductionCommissionSplit(y, m, pool);
@@ -2254,10 +2299,10 @@ function saveProductionSplit(){
   const monthLabel = new Date(y, m-1, 1).toLocaleDateString('en-PH', {month:'long', year:'numeric'});
   rows.forEach(r=>{
     state.commissions.push({ id: uid('cm'), employeeId: r.employeeId, type: 'Production', date,
-      remarks: `Production commission share for ${monthLabel} — ${r.hours.toFixed(2)} hrs worked`, amount: r.share, claimed:false });
+      remarks: `Production commission share for ${monthLabel} — ${r.hours.toFixed(2)} hrs worked`, amount: r.share, runId, claimed:false });
   });
   markDirty(); closeModal(); renderCommTable();
-  toast(`Logged Production commission shares for ${rows.length} employee${rows.length===1?'':'s'} (${monthLabel}).`);
+  toast(`Logged Production commission shares for ${rows.length} employee${rows.length===1?'':'s'} (${monthLabel})${runId ? ' and linked to that payroll run' : ''}.`);
 }
 function toggleCommClaimed(id, val){ const c = state.commissions.find(x=>x.id===id); c.claimed = val; markDirty(); }
 function deleteCommission(id){ state.commissions = state.commissions.filter(x=>x.id!==id); markDirty(); renderCommTable(); }
@@ -2519,7 +2564,7 @@ function renderYtdReport(root){
   const years = Array.from(new Set(state.runs.map(r=>new Date(r.periodEnd).getFullYear()))).sort((a,b)=>b-a);
   const year = years[0] || new Date().getFullYear();
   root.innerHTML = `<div class="section"><div class="section-head">
-    <div><h3>Year-to-Date Summary</h3><div class="desc">YTD Payroll is pure LIC salary (Total Income minus LIC and 5JS Commission). Total Income is Payroll + LIC Commission + 5JS Commission combined.</div></div>
+    <div><h3>Year-to-Date Summary</h3><div class="desc">YTD Payroll is pure LIC salary — Total Income minus LIC, Production, and 5JS Commission. Total Income is Payroll + LIC + Production + 5JS Commission combined.</div></div>
     <div class="flexrow no-print"><select id="ytd_year">${(years.length?years:[year]).map(y=>`<option value="${y}">${y}</option>`).join('')}</select></div>
   </div><div class="section-body"><div id="ytdWrap" class="table-wrap"></div></div></div>`;
   const sel = document.getElementById('ytd_year');
@@ -2531,7 +2576,7 @@ function renderYtdTable(){
   const year = Number(document.getElementById('ytd_year').value);
   const totals = {};
   const ensure = (emp) => {
-    if(!totals[emp.id]) totals[emp.id] = {name:emp.name, earnings:0, deductions:0, takeHome:0, licCommission:0, fivejsCommission:0};
+    if(!totals[emp.id]) totals[emp.id] = {name:emp.name, deductions:0, takeHome:0, embeddedCommission:0, licCommission:0, fivejsCommission:0, productionCommission:0};
     return totals[emp.id];
   };
   state.runs.forEach(r=>{
@@ -2540,7 +2585,12 @@ function renderYtdTable(){
       const emp = empById(en.employeeId); if(!emp) return;
       const c = calcEntry(emp, en, r);
       const t = ensure(emp);
-      t.earnings += c.totalEarnings; t.deductions += c.totalDeductions; t.takeHome += c.takeHome;
+      // grossEarnings tracked via payroll below; embeddedCommission is the LIC/Production portion
+      // of that gross which came from a linked Commission Log entry (see calcEntry's logCommission)
+      // — needed to back it back out for the pure "YTD Payroll" figure.
+      t.grossEarnings = (t.grossEarnings||0) + c.totalEarnings;
+      t.embeddedCommission += c.logCommission;
+      t.deductions += c.totalDeductions; t.takeHome += c.takeHome;
     });
   });
   state.commissions.forEach(cm=>{
@@ -2551,16 +2601,22 @@ function renderYtdTable(){
     const type = (cm.type||'').toUpperCase();
     if(type === 'LIC') t.licCommission += num(cm.amount);
     else if(type === '5JS') t.fivejsCommission += num(cm.amount);
+    else if(type === 'PRODUCTION') t.productionCommission += num(cm.amount);
   });
-  // Total Income (r.earnings, from Total Earnings across the year's runs) already includes any
-  // commission bundled into payroll entries. YTD Payroll backs the LIC/5JS Commission Log totals
-  // out of that, leaving pure LIC salary — mirroring the same YTD Payroll / Total Income figures
-  // shown on each employee's payslip (see computeYTDForEmployee).
-  const rows = Object.values(totals).map(r => ({...r, payroll: r.earnings - r.licCommission - r.fivejsCommission})).sort((a,b)=>b.takeHome-a.takeHome);
-  const grand = rows.reduce((a,r)=>({earnings:a.earnings+r.earnings, payroll:a.payroll+r.payroll, deductions:a.deductions+r.deductions, takeHome:a.takeHome+r.takeHome, licCommission:a.licCommission+r.licCommission, fivejsCommission:a.fivejsCommission+r.fivejsCommission}), {earnings:0,payroll:0,deductions:0,takeHome:0,licCommission:0,fivejsCommission:0});
-  wrap.innerHTML = `<table><thead><tr><th>Employee</th><th class="num">YTD Payroll</th><th class="num">LIC Commission</th><th class="num">5JS Commission</th><th class="num">Total Income</th><th class="num">Total Deductions</th><th class="num">Total Take-Home</th></tr></thead><tbody>
-  ${rows.map(r=>`<tr><td>${esc(r.name)}</td><td class="num">${peso(r.payroll)}</td><td class="num">${peso(r.licCommission)}</td><td class="num">${peso(r.fivejsCommission)}</td><td class="num" style="font-weight:700;">${peso(r.earnings)}</td><td class="num">${peso(r.deductions)}</td><td class="num">${peso(r.takeHome)}</td></tr>`).join('')}
-  </tbody><tfoot><tr style="font-weight:700;background:#fafbfc;"><td>GRAND TOTAL</td><td class="num">${peso(grand.payroll)}</td><td class="num">${peso(grand.licCommission)}</td><td class="num">${peso(grand.fivejsCommission)}</td><td class="num">${peso(grand.earnings)}</td><td class="num">${peso(grand.deductions)}</td><td class="num">${peso(grand.takeHome)}</td></tr></tfoot></table>
+  // YTD Payroll (pure LIC salary) = gross payroll earnings minus whatever LIC/Production commission
+  // is actually embedded in it so far via a Pay Period link — not the full-year Commission Log
+  // totals, which may include commission logged but not yet linked to a payroll run. Total Income
+  // is then rebuilt as Payroll + LIC + 5JS + Production commission, matching how the payslip's YTD
+  // box presents it (see computeYTDForEmployee).
+  const rows = Object.values(totals).map(r => {
+    const payroll = (r.grossEarnings||0) - r.embeddedCommission;
+    const earnings = payroll + r.licCommission + r.fivejsCommission + r.productionCommission;
+    return {...r, payroll, earnings};
+  }).sort((a,b)=>b.takeHome-a.takeHome);
+  const grand = rows.reduce((a,r)=>({earnings:a.earnings+r.earnings, payroll:a.payroll+r.payroll, deductions:a.deductions+r.deductions, takeHome:a.takeHome+r.takeHome, licCommission:a.licCommission+r.licCommission, fivejsCommission:a.fivejsCommission+r.fivejsCommission, productionCommission:a.productionCommission+r.productionCommission}), {earnings:0,payroll:0,deductions:0,takeHome:0,licCommission:0,fivejsCommission:0,productionCommission:0});
+  wrap.innerHTML = `<table><thead><tr><th>Employee</th><th class="num">YTD Payroll</th><th class="num">LIC Commission</th><th class="num">Production Commission</th><th class="num">5JS Commission</th><th class="num">Total Income</th><th class="num">Total Deductions</th><th class="num">Total Take-Home</th></tr></thead><tbody>
+  ${rows.map(r=>`<tr><td>${esc(r.name)}</td><td class="num">${peso(r.payroll)}</td><td class="num">${peso(r.licCommission)}</td><td class="num">${peso(r.productionCommission)}</td><td class="num">${peso(r.fivejsCommission)}</td><td class="num" style="font-weight:700;">${peso(r.earnings)}</td><td class="num">${peso(r.deductions)}</td><td class="num">${peso(r.takeHome)}</td></tr>`).join('')}
+  </tbody><tfoot><tr style="font-weight:700;background:#fafbfc;"><td>GRAND TOTAL</td><td class="num">${peso(grand.payroll)}</td><td class="num">${peso(grand.licCommission)}</td><td class="num">${peso(grand.productionCommission)}</td><td class="num">${peso(grand.fivejsCommission)}</td><td class="num">${peso(grand.earnings)}</td><td class="num">${peso(grand.deductions)}</td><td class="num">${peso(grand.takeHome)}</td></tr></tfoot></table>
   ${rows.length===0?'<div class="empty-state">No payroll or commission data for this year yet.</div>':''}`;
 }
 // ---- Annual Report: every earnings category, totalled per employee for the whole year ----
