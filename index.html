@@ -694,8 +694,14 @@ function computeAllowance(emp, entry, run){
 }
 
 function calcEntry(emp, entry, run){
-  const hr = hourlyRate(emp);
-  const rateDay = num(emp.rateDay);
+  // Rate/Day changes over time (raises), but this entry's Basic Salary/Rest Day/OT/Holiday/Incentive
+  // Leave pay must use whatever rate was ACTUALLY in effect during that specific pay period, not the
+  // employee's current rate. entry.rateDayOverride carries that historical rate for periods where it
+  // differed from what's on the Employee record today (used to correct old runs so they keep
+  // reflecting what was really paid, instead of silently recalculating at today's higher rate); it's
+  // left unset for every ordinary/current entry, which falls back to the employee's live Rate/Day.
+  const rateDay = entry.rateDayOverride != null ? num(entry.rateDayOverride) : num(emp.rateDay);
+  const hr = rateDay / 8;
   const hoursWorked = num(entry.hoursWorked);
   const lateMinutes = num(entry.lateMinutes);
   const otHours = num(entry.otHours);
@@ -721,17 +727,21 @@ function calcEntry(emp, entry, run){
     .filter(cm => cm.runId === run.id && cm.employeeId === emp.id && (cm.type === 'LIC' || cm.type === 'Production'))
     .reduce((a,cm) => a + num(cm.amount), 0);
 
-  // Hours Worked is entered as the TOTAL hours physically present that cutoff — it includes
-  // whatever portion fell on a rest day or on overtime. Basic Salary must only cover the
-  // REGULAR-rate portion of that time (same as the "REGULAR HRS." column in the company's own
-  // payroll Excel: TOTAL HOURS WORKED − REST DAY HOURS − OVERTIME = REGULAR HRS., × Hourly Rate =
-  // BASIC SALARY). Rest Day Pay and OT Pay already pay their own hours in full at hourly rate × the
-  // rest-day/OT multiplier below, so leaving those hours inside Basic Salary too would pay them
-  // twice. OT hours are always carved out of Basic Salary regardless of approval — company policy:
-  // without a signed Overtime Request Summary Form on file, that OT time isn't included/paid at
-  // all (otPay also stays 0 below in that case).
+  // How "Hours Worked" should be read changed starting the Aug 1-15, 2026 cutoff (the first period
+  // entered under the new convention going forward): before that, Hours Worked was already entered
+  // as REGULAR hours only (Rest Day and OT hours tracked entirely separately, never inside it) — so
+  // Basic Salary is simply Hours Worked × Hourly Rate, same as always. From Aug 1-15, 2026 onward,
+  // Hours Worked is entered as the TOTAL hours physically present that cutoff (including whatever
+  // fell on a rest day or on overtime), so Rest Day Hours and OT Hours must be carved back out to
+  // get the REGULAR-rate portion before multiplying by Hourly Rate — otherwise those hours get paid
+  // twice (once at regular rate inside Basic Salary, again at the rest-day/OT premium rate below).
+  // Runs before the cutoff are intentionally left on the old, no-subtraction math so historical
+  // payslips already computed under the old convention don't shift — see calcEntry's comment above
+  // for why this needed to be date-gated instead of a single global formula.
+  const NEW_HOURS_CONVENTION_START = '2026-08-01';
+  const usesNewHoursConvention = !!(run && run.periodStart && run.periodStart >= NEW_HOURS_CONVENTION_START);
   const otApproved = entry.otApproved === true;
-  const regularHours = Math.max(0, hoursWorked - restDayHours - otHours);
+  const regularHours = usesNewHoursConvention ? Math.max(0, hoursWorked - restDayHours - otHours) : hoursWorked;
   const basicSalary = regularHours * hr;
   const restDayPay = hr * num(state.settings.restDayMultiplier) * restDayHours;
   const otPay = otApproved ? hr * num(state.settings.otMultiplier) * otHours : 0;
@@ -1365,7 +1375,10 @@ function renderRunDetail(){
       <td><input type="number" step="0.01" value="${en.thirteenthMonth}" onchange="updEntry('${emp.id}','thirteenthMonth',this.value)"></td>
       <td><input type="number" step="0.5" value="${en.incentiveLeaveDays||0}" onchange="updEntry('${emp.id}','incentiveLeaveDays',this.value)" title="Days × ${peso(emp.rateDay)}/day = ${peso(c.incentiveLeavePay)}"></td>
       <td><input type="number" step="0.01" placeholder="${emp.allowance}" value="${en.allowanceOverride}" onchange="updEntry('${emp.id}','allowanceOverride',this.value)"></td>
-      <td><input type="number" step="0.01" value="${en.adjustment}" onchange="updEntry('${emp.id}','adjustment',this.value)"></td>
+      <td>
+        <input type="number" step="0.01" value="${en.adjustment}" onchange="updEntry('${emp.id}','adjustment',this.value)">
+        <input type="text" value="${esc(en.adjustmentNote||'')}" placeholder="Reason (optional)" onchange="updEntry('${emp.id}','adjustmentNote',this.value)" style="width:100%;font-size:10px;margin-top:2px;padding:2px 4px;" title="Why this adjustment exists — shows in the Payroll Run Summary report and on the payslip.">
+      </td>
       <td class="num" style="font-weight:600;">${peso(c.totalEarnings)}</td>
       <td><label class="checkline"><input type="checkbox" ${en.applyStatutory!==false?'checked':''} onchange="updEntry('${emp.id}','applyStatutory',this.checked)"></label></td>
       <td><input type="number" step="0.01" value="${en.sss}" onchange="updEntry('${emp.id}','sss',this.value)" title="${eligibleForStatutory(emp,'sss') ? '' : (emp.sssNo ? 'Marked \"Don\'t deduct\" on this employee\'s record' : 'No SSS No. on file for this employee')}" style="${eligibleForStatutory(emp,'sss')?'':'background:#fff8e6;'}"></td>
@@ -1876,7 +1889,7 @@ function updEntry(empId, field, value){
   const run = state.runs.find(r=>r.id===currentRunId);
   const en = run.entries.find(e=>e.employeeId===empId);
   if(field === 'applyStatutory' || field === 'otApproved'){ en[field] = !!value; }
-  else if(field === 'allowanceOverride'){ en[field] = value; }
+  else if(field === 'allowanceOverride' || field === 'adjustmentNote'){ en[field] = value; }
   else { en[field] = num(value); }
   markDirty();
   renderRunDetail();
@@ -2254,7 +2267,7 @@ function payslipHtml(emp, en, run){
       <tr><td>13th Month Pay</td><td class="num">${peso(en.thirteenthMonth)}</td></tr>
       <tr><td>Incentive Leave${c.incentiveLeaveDays>0 ? ` (${c.incentiveLeaveDays} day${c.incentiveLeaveDays===1?'':'s'})` : ''}</td><td class="num">${peso(c.incentiveLeavePay)}</td></tr>
       <tr><td>Allowance</td><td class="num">${peso(allowance)}</td></tr>
-      <tr><td>Salary Adjustment</td><td class="num">${peso(en.adjustment)}</td></tr>
+      ${num(en.adjustment) ? `<tr><td>Salary Adjustment${en.adjustmentNote ? `<div style="font-size:9px;color:#777;font-weight:400;">${esc(en.adjustmentNote)}</div>` : ''}</td><td class="num">${peso(en.adjustment)}</td></tr>` : `<tr><td>Salary Adjustment</td><td class="num">${peso(en.adjustment)}</td></tr>`}
       <tr class="totalrow"><td>Total Earnings</td><td class="num">${peso(c.totalEarnings)}</td></tr>
       </table>
     </div>
@@ -2907,6 +2920,20 @@ function renderAnnualReport(root){
   renderAnnualTable();
 }
 function computeAnnualTotals(year){
+  // Years closed out before this app tracked payroll (2024–2025 here) are shown exactly as they
+  // appear in the company's own historical payroll Excel, via state.historicalAnnualTotals[year] —
+  // NOT recomputed live from state.runs. Recomputing them live would silently apply employees'
+  // CURRENT Rate/Day to old pay periods (the app has no record of past rate changes), overstating
+  // what was actually paid back then. Live computation below only ever runs for years that don't
+  // have a stored historical override (2026 onward, once every run's own data is accurate).
+  const override = state.historicalAnnualTotals && state.historicalAnnualTotals[year];
+  if(override){
+    return override.map(r => ({
+      fivejsCommission:0, licCommission:0, productionCommission:0, otherCommission:0,
+      holidayDays:0, incentiveLeave:0, adjustment:0, sss:0, philhealth:0, pagibig:0,
+      ...r
+    })).sort((a,b)=> a.name.localeCompare(b.name));
+  }
   const totals = {};
   const ensure = (emp) => {
     if(!totals[emp.id]) totals[emp.id] = { name: emp.name,
@@ -2949,7 +2976,10 @@ function renderAnnualTable(){
   const year = Number(document.getElementById('ann_year').value);
   const rows = computeAnnualTotals(year);
   const sum = (k) => rows.reduce((a,r)=>a+r[k],0);
-  wrap.innerHTML = `<table><thead><tr>
+  const isHistorical = !!(state.historicalAnnualTotals && state.historicalAnnualTotals[year]);
+  wrap.innerHTML = `
+  ${isHistorical ? `<div class="helpbox">${year} is shown exactly as recorded in the company's payroll records for that year (before this system tracked every pay period in detail) — commission/holiday-days/incentive-leave/adjustment breakdowns weren't part of that historical record, so those columns show ₱0/blank here.</div>` : ''}
+  <table><thead><tr>
     <th>Employee</th><th class="num">Basic Salary</th><th class="num">Rest Day Pay</th><th class="num">OT Pay</th>
     <th class="num">Holiday Days</th><th class="num">Holiday Pay</th><th class="num">5JS Commission</th><th class="num">LIC Commission</th>
     <th class="num">Production Commission</th><th class="num">Other Commission</th><th class="num">13th Month</th>
@@ -2999,11 +3029,18 @@ function renderRunSummaryTable(){
   const wrap = document.getElementById('rsWrap'); if(!wrap) return;
   const run = state.runs.find(r=>r.id===document.getElementById('rs_run').value);
   if(!run) return;
-  let e=0,d=0,t=0;
-  const rows = run.entries.map(en=>{ const emp=empById(en.employeeId); if(!emp) return ''; const c=calcEntry(emp,en,run); e+=c.totalEarnings; d+=c.totalDeductions; t+=c.takeHome;
-    return `<tr><td>${esc(emp.name)}</td><td class="num">${peso(c.totalEarnings)}</td><td class="num">${peso(c.totalDeductions)}</td><td class="num">${peso(c.takeHome)}</td></tr>`; }).join('');
-  wrap.innerHTML = `<table><thead><tr><th>Employee</th><th class="num">Earnings</th><th class="num">Deductions</th><th class="num">Take-Home</th></tr></thead>
-  <tbody>${rows}</tbody><tfoot><tr style="font-weight:700;background:#fafbfc;"><td>TOTAL</td><td class="num">${peso(e)}</td><td class="num">${peso(d)}</td><td class="num">${peso(t)}</td></tr></tfoot></table>`;
+  let e=0,d=0,t=0,adjTotal=0;
+  const rows = run.entries.map(en=>{ const emp=empById(en.employeeId); if(!emp) return ''; const c=calcEntry(emp,en,run); e+=c.totalEarnings; d+=c.totalDeductions; t+=c.takeHome; adjTotal += num(en.adjustment);
+    // Adjustment and its Reason are broken out here (even though Adjustment is already folded into
+    // Earnings above) specifically so anything unusual about this run's pay — a correction, a
+    // one-off bonus, a deduction for a prior overpayment, etc. — stays visible and explained
+    // whenever this report is looked at later, instead of being an unexplained number.
+    return `<tr><td>${esc(emp.name)}</td><td class="num">${peso(c.totalEarnings)}</td><td class="num">${peso(c.totalDeductions)}</td>
+      <td class="num" style="${num(en.adjustment)!==0?'font-weight:600;':''}">${num(en.adjustment)!==0 ? peso(en.adjustment) : '—'}</td>
+      <td style="white-space:normal;min-width:160px;color:${en.adjustmentNote?'inherit':'#999'};">${esc(en.adjustmentNote || (num(en.adjustment)!==0 ? '(no reason noted)' : ''))}</td>
+      <td class="num">${peso(c.takeHome)}</td></tr>`; }).join('');
+  wrap.innerHTML = `<table><thead><tr><th>Employee</th><th class="num">Earnings</th><th class="num">Deductions</th><th class="num">Adjustment</th><th>Reason</th><th class="num">Take-Home</th></tr></thead>
+  <tbody>${rows}</tbody><tfoot><tr style="font-weight:700;background:#fafbfc;"><td>TOTAL</td><td class="num">${peso(e)}</td><td class="num">${peso(d)}</td><td class="num">${peso(adjTotal)}</td><td></td><td class="num">${peso(t)}</td></tr></tfoot></table>`;
 }
 const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 function renderDeductionsReport(root){
