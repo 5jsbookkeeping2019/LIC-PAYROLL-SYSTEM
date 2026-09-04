@@ -637,6 +637,9 @@ function sortEntriesByName(entries){
 
 /* ---------- Calculation engine ---------- */
 function hourlyRate(emp){ return (num(emp.rateDay))/8; }
+// Fixed monthly basic salary reference (Rate per Day × 22 working days) — same convention already
+// used elsewhere (philhealthCompute/pagibigCompute) to derive a monthly basis from the daily rate.
+function monthlyBasicSalary(emp){ return num(emp && emp.rateDay) * 22; }
 
 function sssLookup(monthlyGross){
   const table = state.settings.sss;
@@ -1925,11 +1928,7 @@ function disbursementRows(run){
   return sortEntriesByName(run.entries).map(en=>{
     const emp = empById(en.employeeId); if(!emp) return null;
     const c = calcEntry(emp, en, run);
-    // Monthly Basic Salary reference (Rate per Day × 22 working days) — same convention already
-    // used elsewhere in this app (e.g. philhealthCompute/pagibigCompute) to derive a monthly basis
-    // from the daily rate. This is a fixed reference figure, not what was actually earned this
-    // cutoff (that's c.basicSalary, which only covers half the month).
-    const monthlyBasic = num(emp.rateDay) * 22;
+    const monthlyBasic = monthlyBasicSalary(emp);
     return { emp, en, c, monthlyBasic, method: emp.paymentMethod || 'cash', account: emp.gcashNo || emp.bankAcct || '' };
   }).filter(Boolean);
 }
@@ -3048,17 +3047,18 @@ function renderDeductionsTable(){
       addInto(byMonth[d.getMonth()], c);
     });
     const grand = byMonth.reduce((a,m)=>{ Object.keys(a).forEach(k=>a[k]+=m[k]); return a; }, empty());
+    const monthlyBasic = emp ? monthlyBasicSalary(emp) : 0;
     wrap.innerHTML = `
     <div class="helpbox">${esc(emp?emp.name:'(deleted)')} — ${year} monthly deduction breakdown</div>
-    <table><thead><tr><th>Month</th><th class="num">SSS</th><th class="num">PhilHealth</th><th class="num">Pag-IBIG</th><th class="num">Loan</th><th class="num">Cash Adv.</th><th class="num">Other</th><th class="num">Late Ded.</th><th class="num">Total</th></tr></thead><tbody>
-    ${MONTH_NAMES.map((mn,i)=>{ const m = byMonth[i]; return `<tr><td>${mn}</td><td class="num">${peso(m.sss)}</td><td class="num">${peso(m.philhealth)}</td><td class="num">${peso(m.pagibig)}</td><td class="num">${peso(m.loan)}</td><td class="num">${peso(m.cashAdvance)}</td><td class="num">${peso(m.other)}</td><td class="num">${peso(m.late)}</td><td class="num" style="font-weight:700;">${peso(rowTotal(m))}</td></tr>`; }).join('')}
-    </tbody><tfoot><tr style="font-weight:700;background:#fafbfc;"><td>YEAR TOTAL</td><td class="num">${peso(grand.sss)}</td><td class="num">${peso(grand.philhealth)}</td><td class="num">${peso(grand.pagibig)}</td><td class="num">${peso(grand.loan)}</td><td class="num">${peso(grand.cashAdvance)}</td><td class="num">${peso(grand.other)}</td><td class="num">${peso(grand.late)}</td><td class="num">${peso(rowTotal(grand))}</td></tr></tfoot></table>`;
+    <table><thead><tr><th>Month</th><th class="num">Basic Salary /mo</th><th class="num">SSS</th><th class="num">PhilHealth</th><th class="num">Pag-IBIG</th><th class="num">Loan</th><th class="num">Cash Adv.</th><th class="num">Other</th><th class="num">Late Ded.</th><th class="num">Total</th></tr></thead><tbody>
+    ${MONTH_NAMES.map((mn,i)=>{ const m = byMonth[i]; return `<tr><td>${mn}</td><td class="num">${peso(monthlyBasic)}</td><td class="num">${peso(m.sss)}</td><td class="num">${peso(m.philhealth)}</td><td class="num">${peso(m.pagibig)}</td><td class="num">${peso(m.loan)}</td><td class="num">${peso(m.cashAdvance)}</td><td class="num">${peso(m.other)}</td><td class="num">${peso(m.late)}</td><td class="num" style="font-weight:700;">${peso(rowTotal(m))}</td></tr>`; }).join('')}
+    </tbody><tfoot><tr style="font-weight:700;background:#fafbfc;"><td>YEAR TOTAL</td><td></td><td class="num">${peso(grand.sss)}</td><td class="num">${peso(grand.philhealth)}</td><td class="num">${peso(grand.pagibig)}</td><td class="num">${peso(grand.loan)}</td><td class="num">${peso(grand.cashAdvance)}</td><td class="num">${peso(grand.other)}</td><td class="num">${peso(grand.late)}</td><td class="num">${peso(rowTotal(grand))}</td></tr></tfoot></table>`;
     return;
   }
 
   const totals = {};
   const ensure = (emp) => {
-    if(!totals[emp.id]) totals[emp.id] = {name:emp.name, ...empty()};
+    if(!totals[emp.id]) totals[emp.id] = {name:emp.name, monthlyBasic: monthlyBasicSalary(emp), ...empty()};
     return totals[emp.id];
   };
   state.runs.forEach(r=>{
@@ -3077,9 +3077,9 @@ function renderDeductionsTable(){
   const label = month===null ? `${year} (full year)` : `${MONTH_NAMES[month-1]} ${year}`;
   wrap.innerHTML = `
   <div class="helpbox">${label} — ${rows.length} employee${rows.length===1?'':'s'} with deductions</div>
-  <table><thead><tr><th>Employee</th><th class="num">SSS</th><th class="num">PhilHealth</th><th class="num">Pag-IBIG</th><th class="num">Loan</th><th class="num">Cash Adv.</th><th class="num">Other</th><th class="num">Late Ded.</th><th class="num">Total</th></tr></thead><tbody>
-  ${rows.map(r=>`<tr><td>${esc(r.name)}</td><td class="num">${peso(r.sss)}</td><td class="num">${peso(r.philhealth)}</td><td class="num">${peso(r.pagibig)}</td><td class="num">${peso(r.loan)}</td><td class="num">${peso(r.cashAdvance)}</td><td class="num">${peso(r.other)}</td><td class="num">${peso(r.late)}</td><td class="num" style="font-weight:700;">${peso(rowTotal(r))}</td></tr>`).join('')}
-  </tbody><tfoot><tr style="font-weight:700;background:#fafbfc;"><td>GRAND TOTAL</td><td class="num">${peso(grand.sss)}</td><td class="num">${peso(grand.philhealth)}</td><td class="num">${peso(grand.pagibig)}</td><td class="num">${peso(grand.loan)}</td><td class="num">${peso(grand.cashAdvance)}</td><td class="num">${peso(grand.other)}</td><td class="num">${peso(grand.late)}</td><td class="num">${peso(rowTotal(grand))}</td></tr></tfoot></table>
+  <table><thead><tr><th>Employee</th><th class="num">Basic Salary /mo</th><th class="num">SSS</th><th class="num">PhilHealth</th><th class="num">Pag-IBIG</th><th class="num">Loan</th><th class="num">Cash Adv.</th><th class="num">Other</th><th class="num">Late Ded.</th><th class="num">Total</th></tr></thead><tbody>
+  ${rows.map(r=>`<tr><td>${esc(r.name)}</td><td class="num">${peso(r.monthlyBasic)}</td><td class="num">${peso(r.sss)}</td><td class="num">${peso(r.philhealth)}</td><td class="num">${peso(r.pagibig)}</td><td class="num">${peso(r.loan)}</td><td class="num">${peso(r.cashAdvance)}</td><td class="num">${peso(r.other)}</td><td class="num">${peso(r.late)}</td><td class="num" style="font-weight:700;">${peso(rowTotal(r))}</td></tr>`).join('')}
+  </tbody><tfoot><tr style="font-weight:700;background:#fafbfc;"><td>GRAND TOTAL</td><td></td><td class="num">${peso(grand.sss)}</td><td class="num">${peso(grand.philhealth)}</td><td class="num">${peso(grand.pagibig)}</td><td class="num">${peso(grand.loan)}</td><td class="num">${peso(grand.cashAdvance)}</td><td class="num">${peso(grand.other)}</td><td class="num">${peso(grand.late)}</td><td class="num">${peso(rowTotal(grand))}</td></tr></tfoot></table>
   ${rows.length===0?'<div class="empty-state">No deductions recorded for this period.</div>':''}`;
 }
 function renderTimesheetReport(root){
