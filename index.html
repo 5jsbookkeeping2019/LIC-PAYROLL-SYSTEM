@@ -1925,7 +1925,12 @@ function disbursementRows(run){
   return sortEntriesByName(run.entries).map(en=>{
     const emp = empById(en.employeeId); if(!emp) return null;
     const c = calcEntry(emp, en, run);
-    return { emp, en, c, method: emp.paymentMethod || 'cash', account: emp.gcashNo || emp.bankAcct || '' };
+    // Monthly Basic Salary reference (Rate per Day × 22 working days) — same convention already
+    // used elsewhere in this app (e.g. philhealthCompute/pagibigCompute) to derive a monthly basis
+    // from the daily rate. This is a fixed reference figure, not what was actually earned this
+    // cutoff (that's c.basicSalary, which only covers half the month).
+    const monthlyBasic = num(emp.rateDay) * 22;
+    return { emp, en, c, monthlyBasic, method: emp.paymentMethod || 'cash', account: emp.gcashNo || emp.bankAcct || '' };
   }).filter(Boolean);
 }
 function openDisbursementList(runId){
@@ -1966,15 +1971,16 @@ function renderDisbursementList(runId){
     grandPaid += list.filter(r=>r.en.disbursed===true).reduce((a,r)=>a+r.c.takeHome,0);
     return `<div style="margin-bottom:16px;">
       <h4 style="margin:0 0 6px;">${labels[method]} (${list.length})</h4>
-      <table><thead><tr><th>Employee</th>${method==='bank' ? '<th>Bank</th>' : ''}<th>${method==='cash'?'':'Account No.'}</th><th class="num">Take-Home</th><th>Paid?</th></tr></thead><tbody>
+      <table><thead><tr><th>Employee</th>${method==='bank' ? '<th>Bank</th>' : ''}<th>${method==='cash'?'':'Account No.'}</th><th class="num">Basic Salary /mo</th><th class="num">Take-Home</th><th>Paid?</th></tr></thead><tbody>
       ${list.map(r=>`<tr>
         <td>${esc(r.emp.name)}</td>
         ${method==='bank' ? `<td>${r.emp.bankName ? esc(r.emp.bankName) : '<span class="muted">No bank on file</span>'}</td>` : ''}
         <td>${method==='cash' ? '—' : (r.account ? esc(r.account) : '<span class="muted">No account on file</span>')}</td>
+        <td class="num">${peso(r.monthlyBasic)}</td>
         <td class="num" style="font-weight:600;">${peso(r.c.takeHome)}</td>
         <td><label class="checkline"><input type="checkbox" ${r.en.disbursed===true?'checked':''} onchange="toggleDisbursed('${runId}','${r.emp.id}',this.checked)"></label></td>
       </tr>`).join('')}
-      </tbody><tfoot><tr style="font-weight:700;background:#fafbfc;"><td colspan="${method==='bank'?3:2}">Subtotal</td><td class="num">${peso(subtotal)}</td><td></td></tr></tfoot></table>
+      </tbody><tfoot><tr style="font-weight:700;background:#fafbfc;"><td colspan="${method==='bank'?3:2}">Subtotal</td><td></td><td class="num">${peso(subtotal)}</td><td></td></tr></tfoot></table>
     </div>`;
   }).join('');
   wrap.innerHTML = `
@@ -2004,10 +2010,10 @@ function exportDisbursementCSV(runId){
     }
     return list;
   });
-  const header = ['Employee','Payment Method','Bank Name','Account No.','Take-Home','Paid?'];
+  const header = ['Employee','Payment Method','Bank Name','Account No.','Basic Salary (Monthly)','Take-Home','Paid?'];
   const lines = [header.join(',')];
   rows.forEach(r=>{
-    lines.push([r.emp.name, r.method, (r.method==='bank' ? (r.emp.bankName||'') : ''), r.account, r.c.takeHome.toFixed(2), r.en.disbursed===true?'Yes':'No']
+    lines.push([r.emp.name, r.method, (r.method==='bank' ? (r.emp.bankName||'') : ''), r.account, r.monthlyBasic.toFixed(2), r.c.takeHome.toFixed(2), r.en.disbursed===true?'Yes':'No']
       .map(v=>`"${String(v).replace(/"/g,'""')}"`).join(','));
   });
   downloadText(lines.join('\n'), `Disbursement_${run.periodStart}_to_${run.periodEnd}.csv`, 'text/csv');
