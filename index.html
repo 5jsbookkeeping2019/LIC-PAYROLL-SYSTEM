@@ -1362,7 +1362,10 @@ function renderRunDetail(){
       <td style="white-space:normal;min-width:150px;">${esc(emp.name)}<br><span class="muted" style="font-size:11px;">${esc(emp.position)} · ₱${emp.rateDay}/day</span><br><button class="btn btn-sm no-print" style="margin-top:4px;" onclick="openTimesheetModal('${emp.id}')" title="Enter daily time in/out for this pay period">🕐 Time Sheet</button></td>
       <td><input type="number" step="0.5" value="${en.hoursWorked}" onchange="updEntry('${emp.id}','hoursWorked',this.value)"></td>
       <td><input type="number" step="1" value="${en.lateMinutes}" onchange="updEntry('${emp.id}','lateMinutes',this.value)"></td>
-      <td><input type="number" step="0.5" value="${en.otHours}" onchange="updEntry('${emp.id}','otHours',this.value)"></td>
+      <td>
+        <input type="number" step="0.5" value="${en.otHours}" onchange="updEntry('${emp.id}','otHours',this.value)" title="Only the APPROVED (to-be-paid) OT hours go here — this is what actually gets multiplied by the OT rate.">
+        <input type="number" step="0.5" value="${en.otHoursLogged||''}" placeholder="Total worked (opt.)" onchange="updEntry('${emp.id}','otHoursLogged',this.value)" style="width:100%;font-size:10px;margin-top:2px;padding:2px 4px;" title="Optional: the TOTAL OT hours actually worked, including any hours with no signed OT Form. This is for your own attendance record only — it is never paid and does not affect Basic Salary or Overtime. Leave blank if it's the same as OT Hours.">
+      </td>
       <td><label class="checkline" title="Check only if a signed Overtime Request Summary Form is on file"><input type="checkbox" ${en.otApproved===true?'checked':''} onchange="updEntry('${emp.id}','otApproved',this.checked)"></label></td>
       <td><input type="number" step="0.5" value="${en.restDayHours}" onchange="updEntry('${emp.id}','restDayHours',this.value)"></td>
       <td><input type="number" step="1" value="${en.holidayDays}" onchange="updEntry('${emp.id}','holidayDays',this.value)"></td>
