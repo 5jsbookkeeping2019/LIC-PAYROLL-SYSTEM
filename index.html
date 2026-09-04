@@ -727,21 +727,17 @@ function calcEntry(emp, entry, run){
     .filter(cm => cm.runId === run.id && cm.employeeId === emp.id && (cm.type === 'LIC' || cm.type === 'Production'))
     .reduce((a,cm) => a + num(cm.amount), 0);
 
-  // How "Hours Worked" should be read changed starting the Aug 1-15, 2026 cutoff (the first period
-  // entered under the new convention going forward): before that, Hours Worked was already entered
-  // as REGULAR hours only (Rest Day and OT hours tracked entirely separately, never inside it) — so
-  // Basic Salary is simply Hours Worked × Hourly Rate, same as always. From Aug 1-15, 2026 onward,
-  // Hours Worked is entered as the TOTAL hours physically present that cutoff (including whatever
-  // fell on a rest day or on overtime), so Rest Day Hours and OT Hours must be carved back out to
-  // get the REGULAR-rate portion before multiplying by Hourly Rate — otherwise those hours get paid
-  // twice (once at regular rate inside Basic Salary, again at the rest-day/OT premium rate below).
-  // Runs before the cutoff are intentionally left on the old, no-subtraction math so historical
-  // payslips already computed under the old convention don't shift — see calcEntry's comment above
-  // for why this needed to be date-gated instead of a single global formula.
-  const NEW_HOURS_CONVENTION_START = '2026-08-01';
-  const usesNewHoursConvention = !!(run && run.periodStart && run.periodStart >= NEW_HOURS_CONVENTION_START);
+  // Hours Worked is REGULAR hours only — Rest Day and OT hours are tracked entirely separately
+  // (their own fields below) and are never folded into Hours Worked, whether an entry was filled in
+  // by hand or produced by the Time Sheet's "Apply Totals to Payroll Entry" button (that button's own
+  // math already excludes a day's Rest Day hours and its OT minutes from the regular total it writes
+  // into Hours Worked — see applyTimesheetToEntry). So Basic Salary is simply Hours Worked × Hourly
+  // Rate, with no further subtraction — verified against real Aug 1-15, 2026 Time Sheet data across
+  // this cutoff, where Hours Worked matched the Apply-Totals regular-only figure exactly and did NOT
+  // match "regular + OT + Rest Day", confirming there is no double-count to correct for and this
+  // formula does not need to be date-gated.
   const otApproved = entry.otApproved === true;
-  const regularHours = usesNewHoursConvention ? Math.max(0, hoursWorked - restDayHours - otHours) : hoursWorked;
+  const regularHours = hoursWorked;
   const basicSalary = regularHours * hr;
   const restDayPay = hr * num(state.settings.restDayMultiplier) * restDayHours;
   const otPay = otApproved ? hr * num(state.settings.otMultiplier) * otHours : 0;
