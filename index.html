@@ -902,9 +902,12 @@ function editEmployee(id){
     <div class="field"><label>End Date (if separated)</label><input id="f_endDate" type="date" value="${e.endDate||''}"></div>
     <div class="field"><label>Birthday</label><input id="f_birthday" type="date" value="${e.birthday||''}" title="Used for this employee's own Employee sign-in (name + birthday) to view their payslips"></div>
     <div class="field"><label>TIN</label><input id="f_tin" value="${esc(e.tin||'')}"></div>
-    <div class="field"><label>SSS No.</label><input id="f_sssNo" value="${esc(e.sssNo||'')}"></div>
-    <div class="field"><label>PhilHealth No.</label><input id="f_philhealthNo" value="${esc(e.philhealthNo||'')}"></div>
-    <div class="field"><label>Pag-IBIG No.</label><input id="f_pagibigNo" value="${esc(e.pagibigNo||'')}"></div>
+    <div class="field"><label>SSS No.</label><input id="f_sssNo" value="${esc(e.sssNo||'')}">
+      <label class="checkline" style="margin-top:4px;"><input type="checkbox" id="f_sssExempt" ${e.sssExempt===true?'checked':''}> Don't deduct SSS</label></div>
+    <div class="field"><label>PhilHealth No.</label><input id="f_philhealthNo" value="${esc(e.philhealthNo||'')}">
+      <label class="checkline" style="margin-top:4px;"><input type="checkbox" id="f_philhealthExempt" ${e.philhealthExempt===true?'checked':''}> Don't deduct PhilHealth</label></div>
+    <div class="field"><label>Pag-IBIG No.</label><input id="f_pagibigNo" value="${esc(e.pagibigNo||'')}">
+      <label class="checkline" style="margin-top:4px;"><input type="checkbox" id="f_pagibigExempt" ${e.pagibigExempt===true?'checked':''}> Don't deduct Pag-IBIG</label></div>
     <div class="field"><label>Payment Method</label>
       <select id="f_paymentMethod">
         <option value="cash" ${e.paymentMethod==='cash'?'selected':''}>Cash</option>
@@ -916,6 +919,7 @@ function editEmployee(id){
     <div class="field"><label>Work Schedule From</label><input id="f_schedFrom" type="time" value="${esc(e.schedFrom||'08:00')}"></div>
     <div class="field"><label>Work Schedule To</label><input id="f_schedTo" type="time" value="${esc(e.schedTo||'17:00')}"></div>
   </div>
+  <div class="helpbox" style="margin-top:6px;">"🧮 Auto-Calc SSS/PhilHealth/Pag-IBIG" (in a payroll run) automatically leaves a deduction at ₱0 for anyone with no number on file for it, and for anyone checked "Don't deduct" above — even if they do have a number.</div>
   <div style="margin-top:14px;"><label class="checkline"><input type="checkbox" id="f_isProductionDept" ${(e.isProductionDept===true || (e.isProductionDept===undefined && (e.department||'').toUpperCase().includes('PRODUCTION')))?'checked':''}> Full-time Production Department employee (counts EVERY hour worked toward the Production Commission Split)</label>
   <div class="helpbox" style="margin-top:6px;">Leave this UNCHECKED for someone who only occasionally helps out in Production (like Alfie) — for them, use the "Production?" checkbox on the specific days in their Time Sheet instead, so only those days count.</div></div>
   ${!isNew ? `<div style="margin-top:14px;"><label class="checkline"><input type="checkbox" id="f_active" ${e.active!==false?'checked':''}> Active employee</label></div>` : ''}`;
@@ -1008,6 +1012,9 @@ function saveEmployee(id, isNew){
     philhealthNo: get('f_philhealthNo'), pagibigNo: get('f_pagibigNo'), paymentMethod: get('f_paymentMethod'),
     gcashNo: get('f_gcashNo'), bankAcct: get('f_paymentMethod')==='bank' ? get('f_gcashNo') : '',
     schedFrom: get('f_schedFrom') || '08:00', schedTo: get('f_schedTo') || '17:00',
+    sssExempt: document.getElementById('f_sssExempt').checked,
+    philhealthExempt: document.getElementById('f_philhealthExempt').checked,
+    pagibigExempt: document.getElementById('f_pagibigExempt').checked,
     isProductionDept: document.getElementById('f_isProductionDept').checked,
     active: isNew ? true : document.getElementById('f_active').checked
   };
@@ -1095,6 +1102,17 @@ function lastAppliedStatutoryFor(empId, excludeRunId){
   }
   return null;
 }
+// An employee is only eligible for a given statutory deduction if they actually have that
+// number on file (no SSS No. on record means there's nowhere to remit it, so it can't be
+// deducted) AND they haven't been marked "Don't deduct" for it on their Employee record (for
+// someone who does have the number but the admin has chosen not to deduct it anyway).
+function eligibleForStatutory(emp, type){
+  if(!emp) return false;
+  if(type==='sss') return !!emp.sssNo && emp.sssExempt !== true;
+  if(type==='philhealth') return !!emp.philhealthNo && emp.philhealthExempt !== true;
+  if(type==='pagibig') return !!emp.pagibigNo && emp.pagibigExempt !== true;
+  return true;
+}
 function autoCalcStatutory(runId){
   const run = state.runs.find(r=>r.id===runId);
   if(!run) return;
@@ -1102,7 +1120,7 @@ function autoCalcStatutory(runId){
     alert("SSS/PhilHealth/Pag-IBIG are normally only deducted once a month, on the cutoff paid around the 4th (the 16th–end-of-month period). This run is the 1st–15th cutoff, so there's nothing to auto-calculate here.");
     return;
   }
-  if(!confirm("This will recalculate SSS (from the combined 1st–15th + 16th–end basic salary vs. the SSS bracket table) and carry forward the last PhilHealth/Pag-IBIG amounts for every employee in this run, overwriting current values. Continue?")) return;
+  if(!confirm("This will recalculate SSS (from the combined 1st–15th + 16th–end basic salary vs. the SSS bracket table) and carry forward the last PhilHealth/Pag-IBIG amounts for every employee in this run, overwriting current values. Anyone missing that number, or marked \"Don't deduct\" on their Employee record, will be set to ₱0 for that deduction instead. Continue?")) return;
   const sibling = findSiblingFirstCutoffRun(run);
   let count = 0;
   run.entries.forEach(en=>{
@@ -1114,15 +1132,15 @@ function autoCalcStatutory(runId){
       if(sibEn) basic1 = calcEntry(emp, sibEn, sibling).basicSalary;
     }
     const monthlyBasic = basic1 + basic2;
-    en.sss = sssLookup(monthlyBasic);
     const lastApplied = lastAppliedStatutoryFor(emp.id, run.id);
-    en.philhealth = lastApplied ? num(lastApplied.philhealth) : philhealthCompute(emp.rateDay*22);
-    en.pagibig = lastApplied ? num(lastApplied.pagibig) : pagibigCompute(emp.rateDay*22);
+    en.sss = eligibleForStatutory(emp,'sss') ? sssLookup(monthlyBasic) : 0;
+    en.philhealth = eligibleForStatutory(emp,'philhealth') ? (lastApplied ? num(lastApplied.philhealth) : philhealthCompute(emp.rateDay*22)) : 0;
+    en.pagibig = eligibleForStatutory(emp,'pagibig') ? (lastApplied ? num(lastApplied.pagibig) : pagibigCompute(emp.rateDay*22)) : 0;
     en.applyStatutory = true;
     count++;
   });
   markDirty(); renderRunDetail();
-  toast(`Auto-calculated SSS/PhilHealth/Pag-IBIG for ${count} employee${count===1?'':'s'}`);
+  toast(`Auto-calculated SSS/PhilHealth/Pag-IBIG for ${count} employee${count===1?'':'s'} — skipped a deduction wherever there's no number on file or it's marked "Don't deduct".`);
 }
 function createRun(){
   const start = document.getElementById('np_start').value;
@@ -1137,8 +1155,9 @@ function createRun(){
       employeeId: emp.id, hoursWorked:0, lateMinutes:0, otHours:0, restDayHours:0, holidayDays:0,
       commission:0, thirteenthMonth:0, incentiveLeaveDays:0, incentiveLeavePay:0, allowanceOverride:"", adjustment:0,
       applyStatutory: isLastCutoff,
-      sss: prev ? num(prev.sss) : 0, philhealth: prev ? num(prev.philhealth) : philhealthCompute(emp.rateDay*22),
-      pagibig: prev ? num(prev.pagibig) : pagibigCompute(emp.rateDay*22),
+      sss: (eligibleForStatutory(emp,'sss') && prev) ? num(prev.sss) : 0,
+      philhealth: !eligibleForStatutory(emp,'philhealth') ? 0 : (prev ? num(prev.philhealth) : philhealthCompute(emp.rateDay*22)),
+      pagibig: !eligibleForStatutory(emp,'pagibig') ? 0 : (prev ? num(prev.pagibig) : pagibigCompute(emp.rateDay*22)),
       loanDeduction: prev ? num(prev.loanDeduction) : 0, cashAdvanceDeduction:0, otherDeduction:0
     });
   });
@@ -1212,9 +1231,9 @@ function renderRunDetail(){
       <td><input type="number" step="0.01" value="${en.adjustment}" onchange="updEntry('${emp.id}','adjustment',this.value)"></td>
       <td class="num" style="font-weight:600;">${peso(c.totalEarnings)}</td>
       <td><label class="checkline"><input type="checkbox" ${en.applyStatutory!==false?'checked':''} onchange="updEntry('${emp.id}','applyStatutory',this.checked)"></label></td>
-      <td><input type="number" step="0.01" value="${en.sss}" onchange="updEntry('${emp.id}','sss',this.value)"></td>
-      <td><input type="number" step="0.01" value="${en.philhealth}" onchange="updEntry('${emp.id}','philhealth',this.value)"></td>
-      <td><input type="number" step="0.01" value="${en.pagibig}" onchange="updEntry('${emp.id}','pagibig',this.value)"></td>
+      <td><input type="number" step="0.01" value="${en.sss}" onchange="updEntry('${emp.id}','sss',this.value)" title="${eligibleForStatutory(emp,'sss') ? '' : (emp.sssNo ? 'Marked \"Don\'t deduct\" on this employee\'s record' : 'No SSS No. on file for this employee')}" style="${eligibleForStatutory(emp,'sss')?'':'background:#fff8e6;'}"></td>
+      <td><input type="number" step="0.01" value="${en.philhealth}" onchange="updEntry('${emp.id}','philhealth',this.value)" title="${eligibleForStatutory(emp,'philhealth') ? '' : (emp.philhealthNo ? 'Marked \"Don\'t deduct\" on this employee\'s record' : 'No PhilHealth No. on file for this employee')}" style="${eligibleForStatutory(emp,'philhealth')?'':'background:#fff8e6;'}"></td>
+      <td><input type="number" step="0.01" value="${en.pagibig}" onchange="updEntry('${emp.id}','pagibig',this.value)" title="${eligibleForStatutory(emp,'pagibig') ? '' : (emp.pagibigNo ? 'Marked \"Don\'t deduct\" on this employee\'s record' : 'No Pag-IBIG No. on file for this employee')}" style="${eligibleForStatutory(emp,'pagibig')?'':'background:#fff8e6;'}"></td>
       <td class="num">${peso(c.lateDeduction)}</td>
       <td><input type="number" step="0.01" value="${en.loanDeduction}" onchange="updEntry('${emp.id}','loanDeduction',this.value)"></td>
       <td><input type="number" step="0.01" value="${en.cashAdvanceDeduction}" onchange="updEntry('${emp.id}','cashAdvanceDeduction',this.value)"></td>
@@ -1739,7 +1758,9 @@ function confirmAddEmployeeToRun(){
   const prev = lastEntryForEmployee(empId);
   run.entries.push({ employeeId: empId, hoursWorked:0, lateMinutes:0, otHours:0, otApproved:false, restDayHours:0, holidayDays:0,
     commission:0, thirteenthMonth:0, incentiveLeaveDays:0, incentiveLeavePay:0, allowanceOverride:"", adjustment:0, applyStatutory:true,
-    sss: prev?num(prev.sss):0, philhealth: prev?num(prev.philhealth):0, pagibig: prev?num(prev.pagibig):0,
+    sss: (eligibleForStatutory(emp,'sss') && prev) ? num(prev.sss) : 0,
+    philhealth: (eligibleForStatutory(emp,'philhealth') && prev) ? num(prev.philhealth) : 0,
+    pagibig: (eligibleForStatutory(emp,'pagibig') && prev) ? num(prev.pagibig) : 0,
     loanDeduction: prev?num(prev.loanDeduction):0, cashAdvanceDeduction:0, otherDeduction:0 });
   markDirty(); closeModal(); renderRunDetail();
 }
