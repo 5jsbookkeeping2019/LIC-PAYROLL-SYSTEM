@@ -1139,7 +1139,10 @@ function renderPayroll(root){
   <div class="section no-print">
     <div class="section-head">
       <div><h3>Payroll Runs</h3><div class="desc">One run per pay period (e.g. 1–15, 16–end of month). Click a row to open it.</div></div>
-      <button class="btn btn-primary" onclick="newRunModal()">+ New Payroll Run</button>
+      <div class="flexrow">
+        ${runs.length>1 ? `<button class="btn" onclick="markAllRunsPaidExceptLatest()" title="Marks every employee's Disbursement List 'Paid?' checkbox as checked in every run EXCEPT the most recent one — handy for backfilling old runs that were already paid before this checklist existed">✅ Mark All Previous Runs as Paid</button>` : ''}
+        <button class="btn btn-primary" onclick="newRunModal()">+ New Payroll Run</button>
+      </div>
     </div>
     <div class="section-body">
       ${runs.length ? `<div class="table-wrap"><table><thead><tr><th>Period</th><th>Pay Date</th><th class="num">Employees</th><th></th></tr></thead><tbody>
@@ -1161,6 +1164,30 @@ function newRunModal(){
   <div class="helpbox" style="margin-top:12px;">All active employees will be added automatically, with SSS / PhilHealth / Pag-IBIG carried forward from their last payroll entry so you don't have to retype them.</div>`;
   const foot = `<button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="createRun()">Create Run</button>`;
   openModal("New Payroll Run", body, foot);
+}
+// Bulk-checks the Disbursement List "Paid?" box for every employee in every run EXCEPT the most
+// recent one (by Pay Date) — for backfilling old cutoffs that were already paid out before this
+// checklist existed, while leaving the newest/current run untouched so it still gets checked off
+// for real as those payments actually go out.
+function markAllRunsPaidExceptLatest(){
+  const sorted = [...state.runs].sort((a,b)=> new Date(b.payDate||b.periodEnd) - new Date(a.payDate||a.periodEnd));
+  if(sorted.length < 2){ alert("There's only one payroll run — nothing older to mark as paid."); return; }
+  const latest = sorted[0];
+  const previous = sorted.slice(1);
+  if(!confirm(`Mark every employee as "Paid" in all ${previous.length} run(s) BEFORE ${fmtDate(latest.periodStart)} – ${fmtDate(latest.periodEnd)} (the most recent run, left untouched)? This cannot be undone in bulk — you'd have to uncheck them one by one.`)) return;
+  let count = 0;
+  previous.forEach(r=>{
+    r.entries.forEach(en=>{ en.disbursed = true; count++; });
+  });
+  markDirty(); render();
+  toast(`Marked ${count} entr${count===1?'y':'ies'} as Paid across ${previous.length} previous run(s).`);
+}
+function markAllPaidInRun(runId){
+  const run = state.runs.find(r=>r.id===runId); if(!run) return;
+  if(!confirm(`Mark every employee in this run (${fmtDate(run.periodStart)} – ${fmtDate(run.periodEnd)}) as Paid?`)) return;
+  run.entries.forEach(en=>{ en.disbursed = true; });
+  markDirty(); renderDisbursementList(runId);
+  toast("All entries in this run marked as Paid.");
 }
 function isLastCutoffOfMonth(run){
   const d = new Date(run.periodEnd+'T00:00:00');
@@ -1906,6 +1933,7 @@ function openDisbursementList(runId){
   if(!run) return;
   const body = `<div id="disbWrap"></div>`;
   const foot = `<button class="btn" onclick="closeModal()">Close</button>
+    <button class="btn" onclick="markAllPaidInRun('${runId}')">✅ Mark All Paid</button>
     <button class="btn" onclick="window.print()">🖨 Print</button>
     <button class="btn btn-primary" onclick="exportDisbursementCSV('${runId}')">⬇ Export CSV</button>`;
   openModal(`💸 Disbursement List — ${fmtDate(run.periodStart)} – ${fmtDate(run.periodEnd)}`, body, foot, {wide:true});
