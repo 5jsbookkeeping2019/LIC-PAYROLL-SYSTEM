@@ -2909,6 +2909,7 @@ function renderYtdTable(){
 // This mirrors the "2026" tab in the user's old Excel workbook — but that sheet was just a flat
 // log (one row per employee per pay period, ~24 rows/employee/year); this totals every one of
 // those earnings columns into a single annual row per employee, plus a grand total row.
+const ANNUAL_MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 function renderAnnualReport(root){
   const years = Array.from(new Set(state.runs.map(r=>new Date(r.periodEnd).getFullYear()))).sort((a,b)=>b-a);
   const year = years[0] || new Date().getFullYear();
@@ -2916,20 +2917,25 @@ function renderAnnualReport(root){
     <div><h3>Annual Report</h3><div class="desc">Every earnings amount totalled per employee for the year — Basic Salary through Adjustments, plus 5JS/LIC/Production commission and SSS/PhilHealth/Pag-IBIG. No hours/minutes columns, just the peso (and day) amounts.</div></div>
     <div class="flexrow no-print">
       <select id="ann_year">${(years.length?years:[year]).map(y=>`<option value="${y}">${y}</option>`).join('')}</select>
+      <select id="ann_month"><option value="0">All Months</option>${ANNUAL_MONTH_NAMES.map((m,i)=>`<option value="${i+1}">${m}</option>`).join('')}</select>
       <button class="btn" onclick="exportAnnualReportCSV()">⬇ Export CSV</button>
     </div>
   </div><div class="section-body">
   <div id="annWrap" class="table-wrap"></div></div></div>`;
   document.getElementById('ann_year').addEventListener('change', renderAnnualTable);
+  document.getElementById('ann_month').addEventListener('change', renderAnnualTable);
   renderAnnualTable();
 }
-function computeAnnualTotals(year){
+function computeAnnualTotals(year, month){
   // Years closed out before this app tracked payroll (2024–2025 here) are shown exactly as they
   // appear in the company's own historical payroll Excel, via state.historicalAnnualTotals[year] —
   // NOT recomputed live from state.runs. Recomputing them live would silently apply employees'
   // CURRENT Rate/Day to old pay periods (the app has no record of past rate changes), overstating
   // what was actually paid back then. Live computation below only ever runs for years that don't
   // have a stored historical override (2026 onward, once every run's own data is accurate).
+  // That historical override is only ever a single whole-year total per employee (that's all the old
+  // Excel recorded) — there's no per-month breakdown to filter down to, so `month` is simply ignored
+  // whenever an override applies; the caller is expected to disable the month picker for those years.
   const override = state.historicalAnnualTotals && state.historicalAnnualTotals[year];
   if(override){
     return override.map(r => ({
@@ -2949,6 +2955,10 @@ function computeAnnualTotals(year){
   };
   state.runs.forEach(r=>{
     if(new Date(r.periodEnd).getFullYear() !== year) return;
+    // A run is counted under the month its Period Start falls in — both cutoffs of a given month
+    // (1st–15th and 16th–end) share that month, so this keeps a month's two runs together even
+    // though the 16th–end run's Period End can occasionally land in the next month.
+    if(month && (new Date(r.periodStart).getMonth()+1) !== month) return;
     r.entries.forEach(en=>{
       const emp = empById(en.employeeId); if(!emp) return;
       const c = calcEntry(emp, en, r);
@@ -2965,6 +2975,7 @@ function computeAnnualTotals(year){
   state.commissions.forEach(cm=>{
     if(!cm.date) return;
     if(new Date(cm.date).getFullYear() !== year) return;
+    if(month && (new Date(cm.date).getMonth()+1) !== month) return;
     const emp = empById(cm.employeeId); if(!emp) return;
     const t = ensure(emp);
     const type = (cm.type||'').toUpperCase();
@@ -2978,26 +2989,33 @@ function computeAnnualTotals(year){
 function renderAnnualTable(){
   const wrap = document.getElementById('annWrap'); if(!wrap) return;
   const year = Number(document.getElementById('ann_year').value);
-  const rows = computeAnnualTotals(year);
-  const sum = (k) => rows.reduce((a,r)=>a+r[k],0);
+  const monthSel = document.getElementById('ann_month');
   const isHistorical = !!(state.historicalAnnualTotals && state.historicalAnnualTotals[year]);
+  // The historical override (2024/2025, from the old Excel) is only ever a single whole-year total
+  // per employee — there's no per-period breakdown behind it to filter down to a month — so the
+  // month picker is disabled and forced back to "All Months" whenever such a year is selected.
+  monthSel.disabled = isHistorical;
+  if(isHistorical) monthSel.value = '0';
+  const month = Number(monthSel.value) || 0;
+  const rows = computeAnnualTotals(year, month);
+  const sum = (k) => rows.reduce((a,r)=>a+r[k],0);
   wrap.innerHTML = `
-  ${isHistorical ? `<div class="helpbox">${year} is shown exactly as recorded in the company's payroll records for that year (before this system tracked every pay period in detail) — commission/holiday-days/incentive-leave/adjustment breakdowns weren't part of that historical record, so those columns show ₱0/blank here.</div>` : ''}
+  ${isHistorical ? `<div class="helpbox">${year} is shown exactly as recorded in the company's payroll records for that year (before this system tracked every pay period in detail) — commission/incentive-leave/adjustment breakdowns weren't part of that historical record, so those columns show ₱0/blank here. There's no month-by-month breakdown behind this total, so the month filter is unavailable for this year.</div>` : ''}
   <table><thead><tr>
     <th>Employee</th><th class="num">Basic Salary</th><th class="num">Rest Day Pay</th><th class="num">OT Pay</th>
-    <th class="num">Holiday Days</th><th class="num">Holiday Pay</th><th class="num">5JS Commission</th><th class="num">LIC Commission</th>
+    <th class="num">Holiday Pay</th><th class="num">5JS Commission</th><th class="num">LIC Commission</th>
     <th class="num">Production Commission</th><th class="num">Other Commission</th><th class="num">13th Month</th>
     <th class="num">Allowance</th><th class="num">Incentive Leave</th><th class="num">Adjustment</th>
     <th class="num">SSS</th><th class="num">PhilHealth</th><th class="num">Pag-IBIG</th>
   </tr></thead><tbody>
   ${rows.map(r=>`<tr><td>${esc(r.name)}</td><td class="num">${peso(r.basicSalary)}</td><td class="num">${peso(r.restDayPay)}</td><td class="num">${peso(r.otPay)}</td>
-    <td class="num">${r.holidayDays}</td><td class="num">${peso(r.holidayPay)}</td><td class="num">${peso(r.fivejsCommission)}</td><td class="num">${peso(r.licCommission)}</td>
+    <td class="num">${peso(r.holidayPay)}</td><td class="num">${peso(r.fivejsCommission)}</td><td class="num">${peso(r.licCommission)}</td>
     <td class="num">${peso(r.productionCommission)}</td><td class="num">${peso(r.otherCommission)}</td><td class="num">${peso(r.thirteenthMonth)}</td>
     <td class="num">${peso(r.allowance)}</td><td class="num">${peso(r.incentiveLeave)}</td><td class="num">${peso(r.adjustment)}</td>
     <td class="num">${peso(r.sss)}</td><td class="num">${peso(r.philhealth)}</td><td class="num">${peso(r.pagibig)}</td></tr>`).join('')}
   </tbody><tfoot><tr style="font-weight:700;background:#fafbfc;">
     <td>GRAND TOTAL</td><td class="num">${peso(sum('basicSalary'))}</td><td class="num">${peso(sum('restDayPay'))}</td><td class="num">${peso(sum('otPay'))}</td>
-    <td class="num">${sum('holidayDays')}</td><td class="num">${peso(sum('holidayPay'))}</td><td class="num">${peso(sum('fivejsCommission'))}</td><td class="num">${peso(sum('licCommission'))}</td>
+    <td class="num">${peso(sum('holidayPay'))}</td><td class="num">${peso(sum('fivejsCommission'))}</td><td class="num">${peso(sum('licCommission'))}</td>
     <td class="num">${peso(sum('productionCommission'))}</td><td class="num">${peso(sum('otherCommission'))}</td><td class="num">${peso(sum('thirteenthMonth'))}</td>
     <td class="num">${peso(sum('allowance'))}</td><td class="num">${peso(sum('incentiveLeave'))}</td><td class="num">${peso(sum('adjustment'))}</td>
     <td class="num">${peso(sum('sss'))}</td><td class="num">${peso(sum('philhealth'))}</td><td class="num">${peso(sum('pagibig'))}</td>
@@ -3006,18 +3024,22 @@ function renderAnnualTable(){
 }
 function exportAnnualReportCSV(){
   const year = Number(document.getElementById('ann_year').value);
-  const rows = computeAnnualTotals(year);
-  const header = ['Name','Basic Salary','Rest Day Pay','OT Pay','Holiday Days','Holiday Pay','5JS Commission','LIC Commission',
+  const monthSel = document.getElementById('ann_month');
+  const isHistorical = !!(state.historicalAnnualTotals && state.historicalAnnualTotals[year]);
+  const month = isHistorical ? 0 : (Number(monthSel.value) || 0);
+  const rows = computeAnnualTotals(year, month);
+  const header = ['Name','Basic Salary','Rest Day Pay','OT Pay','Holiday Pay','5JS Commission','LIC Commission',
     'Production Commission','Other Commission','13th Month','Allowance','Incentive Leave','Adjustment','SSS','PhilHealth','Pag-IBIG'];
   const lines = [header.join(',')];
   rows.forEach(r=>{
-    const row = [r.name, r.basicSalary.toFixed(2), r.restDayPay.toFixed(2), r.otPay.toFixed(2), r.holidayDays, r.holidayPay.toFixed(2),
+    const row = [r.name, r.basicSalary.toFixed(2), r.restDayPay.toFixed(2), r.otPay.toFixed(2), r.holidayPay.toFixed(2),
       r.fivejsCommission.toFixed(2), r.licCommission.toFixed(2), r.productionCommission.toFixed(2), r.otherCommission.toFixed(2),
       r.thirteenthMonth.toFixed(2), r.allowance.toFixed(2), r.incentiveLeave.toFixed(2), r.adjustment.toFixed(2),
       r.sss.toFixed(2), r.philhealth.toFixed(2), r.pagibig.toFixed(2)];
     lines.push(row.map(v => `"${String(v).replace(/"/g,'""')}"`).join(','));
   });
-  downloadText(lines.join('\n'), `Annual_Report_${year}.csv`, 'text/csv');
+  const label = month ? `${ANNUAL_MONTH_NAMES[month-1]}_${year}` : `${year}`;
+  downloadText(lines.join('\n'), `Annual_Report_${label}.csv`, 'text/csv');
 }
 function renderRunSummaryReport(root){
   const runs = [...state.runs].sort((a,b)=> new Date(b.periodEnd)-new Date(a.periodEnd));
