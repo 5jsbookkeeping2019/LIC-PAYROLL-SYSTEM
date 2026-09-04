@@ -37,6 +37,10 @@ input,select,textarea{font-family:inherit;font-size:13px;}
 .ts-table thead th{position:sticky;top:0;background:#fff;z-index:5;box-shadow:0 1px 0 var(--line);}
 .ts-table thead th:first-child, .ts-table .ts-date-freeze{position:sticky;left:0;z-index:3;box-shadow:1px 0 0 var(--line);}
 .ts-table thead th:first-child{z-index:6;background:#fff;}
+/* Annual Report: freeze the header row so it stays visible while scrolling through all the
+   employee rows — same sticky-header pattern used for the Payroll Run table and Time Sheet. */
+#annWrap{max-height:75vh;overflow-y:auto;}
+#annWrap thead th{position:sticky;top:0;background:#fff;z-index:5;box-shadow:0 1px 0 var(--line);}
 a{color:var(--brand);}
 
 /* Layout */
@@ -2556,13 +2560,12 @@ function renderAnnualReport(root){
   const years = Array.from(new Set(state.runs.map(r=>new Date(r.periodEnd).getFullYear()))).sort((a,b)=>b-a);
   const year = years[0] || new Date().getFullYear();
   root.innerHTML = `<div class="section"><div class="section-head">
-    <div><h3>Annual Report</h3><div class="desc">Every earnings category totalled per employee for the year — Regular Hours through Adjustments, plus 5JS/LIC/Production commission from the Commission Log — plus TIN, statutory contributions, and a taxable/non-taxable compensation split for BIR withholding tax filing (Alphalist / 1604-C / 2316).</div></div>
+    <div><h3>Annual Report</h3><div class="desc">Every earnings amount totalled per employee for the year — Basic Salary through Adjustments, plus 5JS/LIC/Production commission and SSS/PhilHealth/Pag-IBIG. No hours/minutes columns, just the peso (and day) amounts.</div></div>
     <div class="flexrow no-print">
       <select id="ann_year">${(years.length?years:[year]).map(y=>`<option value="${y}">${y}</option>`).join('')}</select>
       <button class="btn" onclick="exportAnnualReportCSV()">⬇ Export CSV</button>
     </div>
   </div><div class="section-body">
-  <div class="helpbox warn">Non-Taxable Compensation here = SSS + PhilHealth + Pag-IBIG employee contributions actually withheld, plus 13th Month Pay capped at ₱90,000 (the standard "13th month pay and other benefits" exemption). It does NOT include any other de minimis benefits (rice/uniform/medical allowance, etc.) since those aren't tracked separately in this app — if any apply, add them in yourself before filing. This is a computation aid, not tax advice; verify against current BIR rules or your accountant before filing, and note this app does not compute actual withholding tax due.</div>
   <div id="annWrap" class="table-wrap"></div></div></div>`;
   document.getElementById('ann_year').addEventListener('change', renderAnnualTable);
   renderAnnualTable();
@@ -2570,10 +2573,10 @@ function renderAnnualReport(root){
 function computeAnnualTotals(year){
   const totals = {};
   const ensure = (emp) => {
-    if(!totals[emp.id]) totals[emp.id] = { name: emp.name, position: emp.position, tin: emp.tin || '',
-      regularHrs:0, lateMin:0, basicSalary:0, restDayHrs:0, restDayPay:0, otHrs:0, otPay:0,
-      holidayDays:0, holidayPay:0, fivejsCommission:0, licCommission:0, productionCommission:0,
-      otherCommission:0, thirteenthMonth:0, allowance:0, incentiveLeave:0, adjustment:0,
+    if(!totals[emp.id]) totals[emp.id] = { name: emp.name,
+      basicSalary:0, restDayPay:0, otPay:0, holidayDays:0, holidayPay:0,
+      fivejsCommission:0, licCommission:0, productionCommission:0, otherCommission:0,
+      thirteenthMonth:0, allowance:0, incentiveLeave:0, adjustment:0,
       sss:0, philhealth:0, pagibig:0 };
     return totals[emp.id];
   };
@@ -2583,9 +2586,9 @@ function computeAnnualTotals(year){
       const emp = empById(en.employeeId); if(!emp) return;
       const c = calcEntry(emp, en, r);
       const t = ensure(emp);
-      t.regularHrs += num(en.hoursWorked); t.lateMin += num(en.lateMinutes); t.basicSalary += c.basicSalary;
-      t.restDayHrs += num(en.restDayHours); t.restDayPay += c.restDayPay;
-      t.otHrs += num(en.otHours); t.otPay += c.otPay;
+      t.basicSalary += c.basicSalary;
+      t.restDayPay += c.restDayPay;
+      t.otPay += c.otPay;
       t.holidayDays += num(en.holidayDays); t.holidayPay += c.holidayPay;
       t.thirteenthMonth += num(en.thirteenthMonth); t.allowance += c.allowance;
       t.incentiveLeave += c.incentiveLeavePay; t.adjustment += num(en.adjustment);
@@ -2603,21 +2606,7 @@ function computeAnnualTotals(year){
     else if(type === 'PRODUCTION') t.productionCommission += num(cm.amount);
     else t.otherCommission += num(cm.amount);
   });
-  // For BIR withholding tax filing: SSS/PhilHealth/Pag-IBIG employee contributions are always
-  // non-taxable, and 13th Month Pay is non-taxable up to ₱90,000 (the standard exemption cap for
-  // "13th month pay and other benefits"). This does NOT account for other de minimis benefits
-  // (rice/uniform/medical allowance, etc.) since this app doesn't track those as a separate
-  // category — see the caveat helpbox above the table. This is an aid, not authoritative tax
-  // advice; actual withholding tax due still needs to be computed against current BIR tables.
-  const rows = Object.values(totals).map(t => {
-    const totalEarnings = t.basicSalary + t.restDayPay + t.otPay + t.holidayPay + t.fivejsCommission +
-      t.licCommission + t.productionCommission + t.otherCommission + t.thirteenthMonth +
-      t.allowance + t.incentiveLeave + t.adjustment;
-    const nonTaxableComp = t.sss + t.philhealth + t.pagibig + Math.min(90000, t.thirteenthMonth);
-    const taxableComp = Math.max(0, totalEarnings - nonTaxableComp);
-    return { ...t, totalEarnings, nonTaxableComp, taxableComp };
-  }).sort((a,b)=> b.totalEarnings - a.totalEarnings);
-  return rows;
+  return Object.values(totals).sort((a,b)=> a.name.localeCompare(b.name));
 }
 function renderAnnualTable(){
   const wrap = document.getElementById('annWrap'); if(!wrap) return;
@@ -2625,42 +2614,37 @@ function renderAnnualTable(){
   const rows = computeAnnualTotals(year);
   const sum = (k) => rows.reduce((a,r)=>a+r[k],0);
   wrap.innerHTML = `<table><thead><tr>
-    <th>Employee</th><th>TIN</th><th class="num">Regular Hrs</th><th class="num">Late (min)</th><th class="num">Basic Salary</th>
-    <th class="num">Rest Day Hrs</th><th class="num">Rest Day Pay</th><th class="num">OT Hrs</th><th class="num">OT Pay</th>
+    <th>Employee</th><th class="num">Basic Salary</th><th class="num">Rest Day Pay</th><th class="num">OT Pay</th>
     <th class="num">Holiday Days</th><th class="num">Holiday Pay</th><th class="num">5JS Commission</th><th class="num">LIC Commission</th>
     <th class="num">Production Commission</th><th class="num">Other Commission</th><th class="num">13th Month</th>
-    <th class="num">Allowance</th><th class="num">Incentive Leave</th><th class="num">Adjustment</th><th class="num">TOTAL EARNINGS</th>
-    <th class="num">SSS</th><th class="num">PhilHealth</th><th class="num">Pag-IBIG</th><th class="num">Non-Taxable Comp.</th><th class="num">Taxable Comp.</th>
+    <th class="num">Allowance</th><th class="num">Incentive Leave</th><th class="num">Adjustment</th>
+    <th class="num">SSS</th><th class="num">PhilHealth</th><th class="num">Pag-IBIG</th>
   </tr></thead><tbody>
-  ${rows.map(r=>`<tr><td>${esc(r.name)}</td><td>${esc(r.tin)}</td><td class="num">${r.regularHrs.toFixed(2)}</td><td class="num">${r.lateMin.toFixed(0)}</td><td class="num">${peso(r.basicSalary)}</td>
-    <td class="num">${r.restDayHrs.toFixed(2)}</td><td class="num">${peso(r.restDayPay)}</td><td class="num">${r.otHrs.toFixed(2)}</td><td class="num">${peso(r.otPay)}</td>
+  ${rows.map(r=>`<tr><td>${esc(r.name)}</td><td class="num">${peso(r.basicSalary)}</td><td class="num">${peso(r.restDayPay)}</td><td class="num">${peso(r.otPay)}</td>
     <td class="num">${r.holidayDays}</td><td class="num">${peso(r.holidayPay)}</td><td class="num">${peso(r.fivejsCommission)}</td><td class="num">${peso(r.licCommission)}</td>
     <td class="num">${peso(r.productionCommission)}</td><td class="num">${peso(r.otherCommission)}</td><td class="num">${peso(r.thirteenthMonth)}</td>
-    <td class="num">${peso(r.allowance)}</td><td class="num">${peso(r.incentiveLeave)}</td><td class="num">${peso(r.adjustment)}</td><td class="num" style="font-weight:700;">${peso(r.totalEarnings)}</td>
-    <td class="num">${peso(r.sss)}</td><td class="num">${peso(r.philhealth)}</td><td class="num">${peso(r.pagibig)}</td><td class="num">${peso(r.nonTaxableComp)}</td><td class="num" style="font-weight:700;">${peso(r.taxableComp)}</td></tr>`).join('')}
+    <td class="num">${peso(r.allowance)}</td><td class="num">${peso(r.incentiveLeave)}</td><td class="num">${peso(r.adjustment)}</td>
+    <td class="num">${peso(r.sss)}</td><td class="num">${peso(r.philhealth)}</td><td class="num">${peso(r.pagibig)}</td></tr>`).join('')}
   </tbody><tfoot><tr style="font-weight:700;background:#fafbfc;">
-    <td>GRAND TOTAL</td><td></td><td class="num">${sum('regularHrs').toFixed(2)}</td><td class="num">${sum('lateMin').toFixed(0)}</td><td class="num">${peso(sum('basicSalary'))}</td>
-    <td class="num">${sum('restDayHrs').toFixed(2)}</td><td class="num">${peso(sum('restDayPay'))}</td><td class="num">${sum('otHrs').toFixed(2)}</td><td class="num">${peso(sum('otPay'))}</td>
+    <td>GRAND TOTAL</td><td class="num">${peso(sum('basicSalary'))}</td><td class="num">${peso(sum('restDayPay'))}</td><td class="num">${peso(sum('otPay'))}</td>
     <td class="num">${sum('holidayDays')}</td><td class="num">${peso(sum('holidayPay'))}</td><td class="num">${peso(sum('fivejsCommission'))}</td><td class="num">${peso(sum('licCommission'))}</td>
     <td class="num">${peso(sum('productionCommission'))}</td><td class="num">${peso(sum('otherCommission'))}</td><td class="num">${peso(sum('thirteenthMonth'))}</td>
-    <td class="num">${peso(sum('allowance'))}</td><td class="num">${peso(sum('incentiveLeave'))}</td><td class="num">${peso(sum('adjustment'))}</td><td class="num">${peso(sum('totalEarnings'))}</td>
-    <td class="num">${peso(sum('sss'))}</td><td class="num">${peso(sum('philhealth'))}</td><td class="num">${peso(sum('pagibig'))}</td><td class="num">${peso(sum('nonTaxableComp'))}</td><td class="num">${peso(sum('taxableComp'))}</td>
+    <td class="num">${peso(sum('allowance'))}</td><td class="num">${peso(sum('incentiveLeave'))}</td><td class="num">${peso(sum('adjustment'))}</td>
+    <td class="num">${peso(sum('sss'))}</td><td class="num">${peso(sum('philhealth'))}</td><td class="num">${peso(sum('pagibig'))}</td>
   </tr></tfoot></table>
   ${rows.length===0?'<div class="empty-state">No payroll data for this year yet.</div>':''}`;
 }
 function exportAnnualReportCSV(){
   const year = Number(document.getElementById('ann_year').value);
   const rows = computeAnnualTotals(year);
-  const header = ['Name','TIN','Position','Regular Hrs','Late Min','Basic Salary','Rest Day Hrs','Rest Day Pay','OT Hrs','OT Pay',
-    'Holiday Days','Holiday Pay','5JS Commission','LIC Commission','Production Commission','Other Commission','13th Month',
-    'Allowance','Incentive Leave','Adjustment','Total Earnings','SSS','PhilHealth','Pag-IBIG','Non-Taxable Compensation','Taxable Compensation'];
+  const header = ['Name','Basic Salary','Rest Day Pay','OT Pay','Holiday Days','Holiday Pay','5JS Commission','LIC Commission',
+    'Production Commission','Other Commission','13th Month','Allowance','Incentive Leave','Adjustment','SSS','PhilHealth','Pag-IBIG'];
   const lines = [header.join(',')];
   rows.forEach(r=>{
-    const row = [r.name, r.tin, r.position, r.regularHrs.toFixed(2), r.lateMin.toFixed(0), r.basicSalary.toFixed(2), r.restDayHrs.toFixed(2),
-      r.restDayPay.toFixed(2), r.otHrs.toFixed(2), r.otPay.toFixed(2), r.holidayDays, r.holidayPay.toFixed(2), r.fivejsCommission.toFixed(2),
-      r.licCommission.toFixed(2), r.productionCommission.toFixed(2), r.otherCommission.toFixed(2), r.thirteenthMonth.toFixed(2),
-      r.allowance.toFixed(2), r.incentiveLeave.toFixed(2), r.adjustment.toFixed(2), r.totalEarnings.toFixed(2),
-      r.sss.toFixed(2), r.philhealth.toFixed(2), r.pagibig.toFixed(2), r.nonTaxableComp.toFixed(2), r.taxableComp.toFixed(2)];
+    const row = [r.name, r.basicSalary.toFixed(2), r.restDayPay.toFixed(2), r.otPay.toFixed(2), r.holidayDays, r.holidayPay.toFixed(2),
+      r.fivejsCommission.toFixed(2), r.licCommission.toFixed(2), r.productionCommission.toFixed(2), r.otherCommission.toFixed(2),
+      r.thirteenthMonth.toFixed(2), r.allowance.toFixed(2), r.incentiveLeave.toFixed(2), r.adjustment.toFixed(2),
+      r.sss.toFixed(2), r.philhealth.toFixed(2), r.pagibig.toFixed(2)];
     lines.push(row.map(v => `"${String(v).replace(/"/g,'""')}"`).join(','));
   });
   downloadText(lines.join('\n'), `Annual_Report_${year}.csv`, 'text/csv');
