@@ -637,9 +637,6 @@ function sortEntriesByName(entries){
 
 /* ---------- Calculation engine ---------- */
 function hourlyRate(emp){ return (num(emp.rateDay))/8; }
-// Fixed monthly basic salary reference (Rate per Day × 22 working days) — same convention already
-// used elsewhere (philhealthCompute/pagibigCompute) to derive a monthly basis from the daily rate.
-function monthlyBasicSalary(emp){ return num(emp && emp.rateDay) * 22; }
 
 function sssLookup(monthlyGross){
   const table = state.settings.sss;
@@ -1936,8 +1933,9 @@ function disbursementRows(run){
   return sortEntriesByName(run.entries).map(en=>{
     const emp = empById(en.employeeId); if(!emp) return null;
     const c = calcEntry(emp, en, run);
-    const monthlyBasic = monthlyBasicSalary(emp);
-    return { emp, en, c, monthlyBasic, method: emp.paymentMethod || 'cash', account: emp.gcashNo || emp.bankAcct || '' };
+    // Actual Basic Salary earned THIS cutoff (Regular Hrs. × Hourly Rate, per calcEntry) — not a
+    // fixed monthly estimate, so it correctly reflects whatever was actually logged for this run.
+    return { emp, en, c, basicSalary: c.basicSalary, method: emp.paymentMethod || 'cash', account: emp.gcashNo || emp.bankAcct || '' };
   }).filter(Boolean);
 }
 function openDisbursementList(runId){
@@ -1978,12 +1976,12 @@ function renderDisbursementList(runId){
     grandPaid += list.filter(r=>r.en.disbursed===true).reduce((a,r)=>a+r.c.takeHome,0);
     return `<div style="margin-bottom:16px;">
       <h4 style="margin:0 0 6px;">${labels[method]} (${list.length})</h4>
-      <table><thead><tr><th>Employee</th>${method==='bank' ? '<th>Bank</th>' : ''}<th>${method==='cash'?'':'Account No.'}</th><th class="num">Basic Salary /mo</th><th class="num">Take-Home</th><th>Paid?</th></tr></thead><tbody>
+      <table><thead><tr><th>Employee</th>${method==='bank' ? '<th>Bank</th>' : ''}<th>${method==='cash'?'':'Account No.'}</th><th class="num">Basic Salary</th><th class="num">Take-Home</th><th>Paid?</th></tr></thead><tbody>
       ${list.map(r=>`<tr>
         <td>${esc(r.emp.name)}</td>
         ${method==='bank' ? `<td>${r.emp.bankName ? esc(r.emp.bankName) : '<span class="muted">No bank on file</span>'}</td>` : ''}
         <td>${method==='cash' ? '—' : (r.account ? esc(r.account) : '<span class="muted">No account on file</span>')}</td>
-        <td class="num">${peso(r.monthlyBasic)}</td>
+        <td class="num">${peso(r.basicSalary)}</td>
         <td class="num" style="font-weight:600;">${peso(r.c.takeHome)}</td>
         <td><label class="checkline"><input type="checkbox" ${r.en.disbursed===true?'checked':''} onchange="toggleDisbursed('${runId}','${r.emp.id}',this.checked)"></label></td>
       </tr>`).join('')}
@@ -2017,10 +2015,10 @@ function exportDisbursementCSV(runId){
     }
     return list;
   });
-  const header = ['Employee','Payment Method','Bank Name','Account No.','Basic Salary (Monthly)','Take-Home','Paid?'];
+  const header = ['Employee','Payment Method','Bank Name','Account No.','Basic Salary','Take-Home','Paid?'];
   const lines = [header.join(',')];
   rows.forEach(r=>{
-    lines.push([r.emp.name, r.method, (r.method==='bank' ? (r.emp.bankName||'') : ''), r.account, r.monthlyBasic.toFixed(2), r.c.takeHome.toFixed(2), r.en.disbursed===true?'Yes':'No']
+    lines.push([r.emp.name, r.method, (r.method==='bank' ? (r.emp.bankName||'') : ''), r.account, r.basicSalary.toFixed(2), r.c.takeHome.toFixed(2), r.en.disbursed===true?'Yes':'No']
       .map(v=>`"${String(v).replace(/"/g,'""')}"`).join(','));
   });
   downloadText(lines.join('\n'), `Disbursement_${run.periodStart}_to_${run.periodEnd}.csv`, 'text/csv');
@@ -3037,9 +3035,12 @@ function renderDeductionsTable(){
   const monthSel = document.getElementById('ded_month').value;
   const month = monthSel === 'all' ? null : Number(monthSel);
   const empSel = document.getElementById('ded_emp') ? document.getElementById('ded_emp').value : 'all';
-  const empty = () => ({sss:0, philhealth:0, pagibig:0, loan:0, cashAdvance:0, other:0, late:0});
+  const empty = () => ({basic:0, sss:0, philhealth:0, pagibig:0, loan:0, cashAdvance:0, other:0, late:0});
   const rowTotal = r => r.sss+r.philhealth+r.pagibig+r.loan+r.cashAdvance+r.other+r.late;
-  const addInto = (t, c) => { t.sss += c.sss; t.philhealth += c.philhealth; t.pagibig += c.pagibig;
+  // Basic Salary here is the ACTUAL amount earned (Regular Hrs. × Hourly Rate, per calcEntry —
+  // same figure SSS is auto-calculated from), not a fixed monthly estimate. A month/period with no
+  // payroll run recorded correctly shows ₱0, not a number implying pay that never actually happened.
+  const addInto = (t, c) => { t.basic += c.basicSalary; t.sss += c.sss; t.philhealth += c.philhealth; t.pagibig += c.pagibig;
     t.loan += c.loanDeduction; t.cashAdvance += c.cashAdvanceDeduction; t.other += c.otherDeduction; t.late += c.lateDeduction; };
 
   if(empSel !== 'all'){
@@ -3055,18 +3056,17 @@ function renderDeductionsTable(){
       addInto(byMonth[d.getMonth()], c);
     });
     const grand = byMonth.reduce((a,m)=>{ Object.keys(a).forEach(k=>a[k]+=m[k]); return a; }, empty());
-    const monthlyBasic = emp ? monthlyBasicSalary(emp) : 0;
     wrap.innerHTML = `
     <div class="helpbox">${esc(emp?emp.name:'(deleted)')} — ${year} monthly deduction breakdown</div>
-    <table><thead><tr><th>Month</th><th class="num">Basic Salary /mo</th><th class="num">SSS</th><th class="num">PhilHealth</th><th class="num">Pag-IBIG</th><th class="num">Loan</th><th class="num">Cash Adv.</th><th class="num">Other</th><th class="num">Late Ded.</th><th class="num">Total</th></tr></thead><tbody>
-    ${MONTH_NAMES.map((mn,i)=>{ const m = byMonth[i]; return `<tr><td>${mn}</td><td class="num">${peso(monthlyBasic)}</td><td class="num">${peso(m.sss)}</td><td class="num">${peso(m.philhealth)}</td><td class="num">${peso(m.pagibig)}</td><td class="num">${peso(m.loan)}</td><td class="num">${peso(m.cashAdvance)}</td><td class="num">${peso(m.other)}</td><td class="num">${peso(m.late)}</td><td class="num" style="font-weight:700;">${peso(rowTotal(m))}</td></tr>`; }).join('')}
-    </tbody><tfoot><tr style="font-weight:700;background:#fafbfc;"><td>YEAR TOTAL</td><td></td><td class="num">${peso(grand.sss)}</td><td class="num">${peso(grand.philhealth)}</td><td class="num">${peso(grand.pagibig)}</td><td class="num">${peso(grand.loan)}</td><td class="num">${peso(grand.cashAdvance)}</td><td class="num">${peso(grand.other)}</td><td class="num">${peso(grand.late)}</td><td class="num">${peso(rowTotal(grand))}</td></tr></tfoot></table>`;
+    <table><thead><tr><th>Month</th><th class="num">Basic Salary</th><th class="num">SSS</th><th class="num">PhilHealth</th><th class="num">Pag-IBIG</th><th class="num">Loan</th><th class="num">Cash Adv.</th><th class="num">Other</th><th class="num">Late Ded.</th><th class="num">Total</th></tr></thead><tbody>
+    ${MONTH_NAMES.map((mn,i)=>{ const m = byMonth[i]; return `<tr><td>${mn}</td><td class="num">${peso(m.basic)}</td><td class="num">${peso(m.sss)}</td><td class="num">${peso(m.philhealth)}</td><td class="num">${peso(m.pagibig)}</td><td class="num">${peso(m.loan)}</td><td class="num">${peso(m.cashAdvance)}</td><td class="num">${peso(m.other)}</td><td class="num">${peso(m.late)}</td><td class="num" style="font-weight:700;">${peso(rowTotal(m))}</td></tr>`; }).join('')}
+    </tbody><tfoot><tr style="font-weight:700;background:#fafbfc;"><td>YEAR TOTAL</td><td class="num">${peso(grand.basic)}</td><td class="num">${peso(grand.sss)}</td><td class="num">${peso(grand.philhealth)}</td><td class="num">${peso(grand.pagibig)}</td><td class="num">${peso(grand.loan)}</td><td class="num">${peso(grand.cashAdvance)}</td><td class="num">${peso(grand.other)}</td><td class="num">${peso(grand.late)}</td><td class="num">${peso(rowTotal(grand))}</td></tr></tfoot></table>`;
     return;
   }
 
   const totals = {};
   const ensure = (emp) => {
-    if(!totals[emp.id]) totals[emp.id] = {name:emp.name, monthlyBasic: monthlyBasicSalary(emp), ...empty()};
+    if(!totals[emp.id]) totals[emp.id] = {name:emp.name, ...empty()};
     return totals[emp.id];
   };
   state.runs.forEach(r=>{
@@ -3085,9 +3085,9 @@ function renderDeductionsTable(){
   const label = month===null ? `${year} (full year)` : `${MONTH_NAMES[month-1]} ${year}`;
   wrap.innerHTML = `
   <div class="helpbox">${label} — ${rows.length} employee${rows.length===1?'':'s'} with deductions</div>
-  <table><thead><tr><th>Employee</th><th class="num">Basic Salary /mo</th><th class="num">SSS</th><th class="num">PhilHealth</th><th class="num">Pag-IBIG</th><th class="num">Loan</th><th class="num">Cash Adv.</th><th class="num">Other</th><th class="num">Late Ded.</th><th class="num">Total</th></tr></thead><tbody>
-  ${rows.map(r=>`<tr><td>${esc(r.name)}</td><td class="num">${peso(r.monthlyBasic)}</td><td class="num">${peso(r.sss)}</td><td class="num">${peso(r.philhealth)}</td><td class="num">${peso(r.pagibig)}</td><td class="num">${peso(r.loan)}</td><td class="num">${peso(r.cashAdvance)}</td><td class="num">${peso(r.other)}</td><td class="num">${peso(r.late)}</td><td class="num" style="font-weight:700;">${peso(rowTotal(r))}</td></tr>`).join('')}
-  </tbody><tfoot><tr style="font-weight:700;background:#fafbfc;"><td>GRAND TOTAL</td><td></td><td class="num">${peso(grand.sss)}</td><td class="num">${peso(grand.philhealth)}</td><td class="num">${peso(grand.pagibig)}</td><td class="num">${peso(grand.loan)}</td><td class="num">${peso(grand.cashAdvance)}</td><td class="num">${peso(grand.other)}</td><td class="num">${peso(grand.late)}</td><td class="num">${peso(rowTotal(grand))}</td></tr></tfoot></table>
+  <table><thead><tr><th>Employee</th><th class="num">Basic Salary</th><th class="num">SSS</th><th class="num">PhilHealth</th><th class="num">Pag-IBIG</th><th class="num">Loan</th><th class="num">Cash Adv.</th><th class="num">Other</th><th class="num">Late Ded.</th><th class="num">Total</th></tr></thead><tbody>
+  ${rows.map(r=>`<tr><td>${esc(r.name)}</td><td class="num">${peso(r.basic)}</td><td class="num">${peso(r.sss)}</td><td class="num">${peso(r.philhealth)}</td><td class="num">${peso(r.pagibig)}</td><td class="num">${peso(r.loan)}</td><td class="num">${peso(r.cashAdvance)}</td><td class="num">${peso(r.other)}</td><td class="num">${peso(r.late)}</td><td class="num" style="font-weight:700;">${peso(rowTotal(r))}</td></tr>`).join('')}
+  </tbody><tfoot><tr style="font-weight:700;background:#fafbfc;"><td>GRAND TOTAL</td><td class="num">${peso(grand.basic)}</td><td class="num">${peso(grand.sss)}</td><td class="num">${peso(grand.philhealth)}</td><td class="num">${peso(grand.pagibig)}</td><td class="num">${peso(grand.loan)}</td><td class="num">${peso(grand.cashAdvance)}</td><td class="num">${peso(grand.other)}</td><td class="num">${peso(grand.late)}</td><td class="num">${peso(rowTotal(grand))}</td></tr></tfoot></table>
   ${rows.length===0?'<div class="empty-state">No deductions recorded for this period.</div>':''}`;
 }
 function renderTimesheetReport(root){
