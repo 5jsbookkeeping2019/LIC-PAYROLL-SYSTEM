@@ -1217,14 +1217,19 @@ function findSiblingFirstCutoffRun(run){
     return rs.getFullYear()===d.getFullYear() && rs.getMonth()===d.getMonth() && rs.getDate()===1;
   }) || null;
 }
-// Finds the most recent prior entry for this employee where PhilHealth/Pag-IBIG were actually withheld
-// (i.e. the last "applied" payday), so we can carry the same fixed amount forward.
-function lastAppliedStatutoryFor(empId, excludeRunId){
+// Finds the most recent prior entry for this employee where a PARTICULAR deduction (PhilHealth OR
+// Pag-IBIG, whichever `field` names) was actually withheld, so we can carry that same fixed amount
+// forward. This is looked up separately per field — NOT as one shared "either one was nonzero" check —
+// because an employee's PhilHealth and Pag-IBIG can go active on different dates (e.g. Pag-IBIG only
+// just turned on for them). Sharing one lookup used to mean a newly-eligible deduction could inherit a
+// stale ₱0 from an old entry where only the OTHER deduction happened to be nonzero, silently zeroing
+// out Pag-IBIG (or PhilHealth) even after "Don't deduct" was unchecked and Auto-Calc was re-run.
+function lastAppliedStatutoryFor(empId, excludeRunId, field){
   const runs = [...state.runs].sort((a,b)=> new Date(b.periodEnd) - new Date(a.periodEnd));
   for(const r of runs){
     if(r.id === excludeRunId) continue;
     const en = r.entries.find(x=>x.employeeId===empId);
-    if(en && (num(en.philhealth) || num(en.pagibig))) return en;
+    if(en && num(en[field])) return en;
   }
   return null;
 }
@@ -1275,10 +1280,11 @@ function autoCalcStatutory(runId){
       if(sibEn) basic1 = calcEntry(emp, sibEn, sibling).basicSalary;
     }
     const monthlyBasic = basic1 + basic2;
-    const lastApplied = lastAppliedStatutoryFor(emp.id, run.id);
+    const lastAppliedPhilhealth = lastAppliedStatutoryFor(emp.id, run.id, 'philhealth');
+    const lastAppliedPagibig = lastAppliedStatutoryFor(emp.id, run.id, 'pagibig');
     en.sss = eligibleForStatutory(emp,'sss') ? sssLookup(monthlyBasic) : 0;
-    en.philhealth = eligibleForStatutory(emp,'philhealth') ? (lastApplied ? num(lastApplied.philhealth) : philhealthCompute(emp.rateDay*22)) : 0;
-    en.pagibig = eligibleForStatutory(emp,'pagibig') ? (lastApplied ? num(lastApplied.pagibig) : pagibigCompute(emp.rateDay*22)) : 0;
+    en.philhealth = eligibleForStatutory(emp,'philhealth') ? (lastAppliedPhilhealth ? num(lastAppliedPhilhealth.philhealth) : philhealthCompute(emp.rateDay*22)) : 0;
+    en.pagibig = eligibleForStatutory(emp,'pagibig') ? (lastAppliedPagibig ? num(lastAppliedPagibig.pagibig) : pagibigCompute(emp.rateDay*22)) : 0;
     en.applyStatutory = true;
     count++;
   });
