@@ -97,7 +97,12 @@ table{width:100%;border-collapse:collapse;font-size:13px;}
 th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.3px;color:var(--ink-soft);padding:8px 10px;border-bottom:1px solid var(--line);white-space:nowrap;}
 td{padding:8px 10px;border-bottom:1px solid #edf0f3;white-space:nowrap;}
 tbody tr:hover{background:#fafbfc;}
-.table-wrap{overflow-x:auto;}
+.table-wrap{overflow-x:auto;max-height:75vh;overflow-y:auto;}
+/* Freezes every table's header row (column names) in place while its body scrolls — applies
+   site-wide by default; the more specific rules above/below (#runDetail, #annWrap, .ts-table,
+   .modal-body .table-wrap) still win where they set their own max-height, but every other table
+   across every tab now gets the same "column names stay visible" behavior automatically. */
+.table-wrap thead th{position:sticky;top:0;background:#fff;z-index:5;box-shadow:0 1px 0 var(--line);}
 td input, td select{width:80px;padding:4px 6px;border:1px solid var(--line);border-radius:5px;font-size:12.5px;}
 td input.wide{width:120px;}
 .num{text-align:right;font-variant-numeric:tabular-nums;}
@@ -1245,7 +1250,7 @@ function eligibleForStatutory(emp, type){
   return true;
 }
 // Re-syncs every entry's Loan/CA deduction in an already-created run against the loan/installment
-// schedule (see scheduledLoanDeductionForRun) — for fixing up a run that was created before its
+// schedule (see scheduledDeductionsForRun) — for fixing up a run that was created before its
 // employees' scheduled installments were set up, or before this exact-payday matching existed
 // (older runs may have carried forward a flat amount from the previous cutoff regardless of
 // whether anything was actually due that payday).
@@ -1255,7 +1260,9 @@ function syncLoanDeductionsForRun(runId){
   if(!confirm("This will replace every employee's Loan/Cash Advance deduction in this run with whatever is actually scheduled for this exact Pay Date (" + fmtDate(run.payDate) + ") in Loans & Deductions — overwriting current values. Continue?")) return;
   let count = 0;
   run.entries.forEach(en=>{
-    en.loanDeduction = scheduledLoanDeductionForRun(en.employeeId, run);
+    const d = scheduledDeductionsForRun(en.employeeId, run);
+    en.loanDeduction = d.loan;
+    en.cashAdvanceDeduction = d.cashAdvance;
     count++;
   });
   markDirty(); renderRunDetail();
@@ -1300,6 +1307,7 @@ function createRun(){
   const run = { id: uid('run'), periodStart:start, periodEnd:end, payDate:pay, entries: [] };
   activeEmployees().forEach(emp=>{
     const prev = lastEntryForEmployee(emp.id);
+    const d = scheduledDeductionsForRun(emp.id, run);
     run.entries.push({
       employeeId: emp.id, hoursWorked:0, lateMinutes:0, otHours:0, restDayHours:0, holidayDays:0,
       commission:0, thirteenthMonth:0, incentiveLeaveDays:0, incentiveLeavePay:0, allowanceOverride:"", adjustment:0,
@@ -1307,7 +1315,7 @@ function createRun(){
       sss: (eligibleForStatutory(emp,'sss') && prev) ? num(prev.sss) : 0,
       philhealth: !eligibleForStatutory(emp,'philhealth') ? 0 : (prev ? num(prev.philhealth) : philhealthCompute(emp.rateDay*22)),
       pagibig: !eligibleForStatutory(emp,'pagibig') ? 0 : (prev ? num(prev.pagibig) : pagibigCompute(emp.rateDay*22)),
-      loanDeduction: scheduledLoanDeductionForRun(emp.id, run), cashAdvanceDeduction:0, otherDeduction:0
+      loanDeduction: d.loan, cashAdvanceDeduction: d.cashAdvance, otherDeduction:0
     });
   });
   state.runs.push(run);
@@ -1630,7 +1638,7 @@ function renderTimesheetModal(empId){
       <td class="num">${isRestDay ? '—' : lateMinutes.toFixed(0)}</td>
       <td class="num" title="${lateMinutes>0 ? 'Voided — he was late this day' : ''}">${isRestDay ? '—' : otHours.toFixed(2)}</td>
       <td class="num" title="${isRestDay ? 'Saturday/Sunday work — counted as Rest Day, not regular hours' : ''}">${isRestDay ? hoursWorked.toFixed(2) : '—'}</td>
-      <td><input type="text" data-idx="${idx}" data-field="remarks" value="${esc(day.remarks)}" placeholder="e.g. Rest Day"  onchange="updTimesheetDay('${empId}',${idx},'remarks',this.value)"></td>
+      <td><input type="text" data-idx="${idx}" data-field="remarks" value="${esc(day.remarks)}" placeholder="e.g. Rest Day" title="Type exactly LWP to auto-log this day as 1 used Incentive Leave day for this employee — it'll show up in the Incentive Leave Tracker automatically." onchange="updTimesheetDay('${empId}',${idx},'remarks',this.value)"></td>
       <td style="text-align:center;"><input type="checkbox" data-idx="${idx}" data-field="isProduction" ${day.isProduction ? 'checked' : ''} title="Check only for a day this person actually worked in the Production Department (e.g. Alfie helping out that day)." onchange="updTimesheetDay('${empId}',${idx},'isProduction',this.checked)"></td>
     </tr>`;
   }).join('');
@@ -1647,7 +1655,7 @@ function renderTimesheetModal(empId){
       <div class="field"><label>Work Schedule To (period default)</label><input type="time" data-field="schedToDefault" value="${en.schedTo}" onchange="updTimesheetSched('${empId}','schedTo',this.value)"></div>
     </div>
     <div class="muted" style="font-size:11.5px;margin-bottom:10px;">Pick a name to switch — whatever you change is already saved as you go. ✓ = already has time punches entered.</div>
-    <div class="helpbox">Hours Worked, Late, and OT are all computed automatically from Time In / Time Out vs. the Work Schedule. OT past the Schedule To time only counts once at least a full hour has actually been rendered (under 60 minutes earns 0), then rounds to the nearest 30-minute block, and is voided to 0 entirely on any day he clocked in late — staying late doesn't earn OT if he starts late that day. Clocking in early only earns OT in full whole hours (1 hour, 2 hours, 3 hours...) — any leftover minutes that don't complete another full hour are dropped, and anything under a full hour early counts toward neither OT nor Hours Worked at all. Any day worked that falls on a Saturday or Sunday (highlighted below) is counted entirely as Rest Day hours instead — it's kept out of regular Hours Worked/Late/OT and paid at the Rest Day rate instead. If someone works a different shift on specific days (e.g. 1:00 PM–10:00 PM instead of their usual schedule), set that day's Sched In/Out columns (highlighted blue below) — leave them blank on every other day to keep using the period default above. This is saved with the payroll run, but only affects pay once you click "Apply Totals to Payroll Entry" below (and OT still isn't actually paid until the "OT Form?" box is checked on the payroll entry). Check the "Production?" box only on a day this person actually worked in the Production Department (e.g. Alfie helping out there) — this is what the Compute Production Commission Split tool (in Commissions) uses to know which of his hours count, instead of guessing from the Remarks text.</div>
+    <div class="helpbox">Hours Worked, Late, and OT are all computed automatically from Time In / Time Out vs. the Work Schedule. OT past the Schedule To time only counts once at least a full hour has actually been rendered (under 60 minutes earns 0), then rounds to the nearest 30-minute block, and is voided to 0 entirely on any day he clocked in late — staying late doesn't earn OT if he starts late that day. Clocking in early only earns OT in full whole hours (1 hour, 2 hours, 3 hours...) — any leftover minutes that don't complete another full hour are dropped, and anything under a full hour early counts toward neither OT nor Hours Worked at all. Any day worked that falls on a Saturday or Sunday (highlighted below) is counted entirely as Rest Day hours instead — it's kept out of regular Hours Worked/Late/OT and paid at the Rest Day rate instead. If someone works a different shift on specific days (e.g. 1:00 PM–10:00 PM instead of their usual schedule), set that day's Sched In/Out columns (highlighted blue below) — leave them blank on every other day to keep using the period default above. This is saved with the payroll run, but only affects pay once you click "Apply Totals to Payroll Entry" below (and OT still isn't actually paid until the "OT Form?" box is checked on the payroll entry). Check the "Production?" box only on a day this person actually worked in the Production Department (e.g. Alfie helping out there) — this is what the Compute Production Commission Split tool (in Commissions) uses to know which of his hours count, instead of guessing from the Remarks text. Type exactly <b>LWP</b> in a day's Remarks to auto-log that day as 1 used Incentive Leave day in the Incentive Leave Tracker (Entitled/Used/Balance and the Notes/Dates column update by themselves) — clearing or changing that Remarks text removes it from the Tracker again. This only updates the Tracker; it does not by itself pay for that day — still fill in "Incentive Leave (Days)" on the payroll entry if this day should also be paid out.</div>
     <div class="table-wrap">
     <table class="ts-table">
       <thead><tr><th>Date</th><th>Sched In</th><th>Sched Out</th><th>Time In</th><th>Lunch Out</th><th>Lunch In</th><th>Time Out</th><th class="num">Hrs Worked</th><th class="num">Late (min)</th><th class="num">OT Hrs</th><th class="num">Rest Day Hrs</th><th>Remarks</th><th>Production?</th></tr></thead>
@@ -1695,8 +1703,37 @@ function updTimesheetDay(empId, idx, field, value){
   const en = run && run.entries.find(e=>e.employeeId===empId);
   if(!en || !en.timesheet[idx]) return;
   en.timesheet[idx][field] = (field==='otHours') ? num(value) : (field==='isProduction' ? !!value : value);
+  if(field==='remarks') syncLeaveFromTimesheetDay(empId, en.timesheet[idx].date);
   markDirty();
   rerenderTimesheetPreservingFocus(empId);
+}
+// Keeps the Incentive Leave Tracker in sync with the Time Sheet: typing "LWP" into a day's Remarks
+// auto-logs that day as 1 used incentive leave day for that employee/year (same shape as clicking
+// "+ Add / Log Leave" by hand, so it shows up the same way in the tracker's Used count and
+// Notes/Dates column). Editing the remarks away from "LWP" — or clearing it — removes that same
+// auto-logged record again, so toggling it never leaves a stale or duplicate entry behind. This
+// only touches the Tracker (entitlement/used/balance bookkeeping) — it does NOT touch the payroll
+// entry's own "Incentive Leave (Days)" field, so the day still needs that filled in separately if
+// you actually want it paid out as incentive leave on this cutoff.
+function syncLeaveFromTimesheetDay(empId, date){
+  const run = state.runs.find(r=>r.id===currentRunId);
+  const en = run && run.entries.find(e=>e.employeeId===empId);
+  const day = en && en.timesheet && en.timesheet.find(d=>d.date===date);
+  const isLWP = !!day && String(day.remarks||'').trim().toUpperCase() === 'LWP';
+  const existingIdx = state.incentiveLeave.findIndex(l=>l.source==='timesheet' && l.employeeId===empId && l.date===date);
+  if(isLWP){
+    const year = new Date(date+'T00:00:00').getFullYear();
+    const note = `1 DAY - ${new Date(date+'T00:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric'}).toUpperCase()}`;
+    if(existingIdx>=0){
+      state.incentiveLeave[existingIdx].used = 1;
+      state.incentiveLeave[existingIdx].year = year;
+      state.incentiveLeave[existingIdx].note = note;
+    } else {
+      state.incentiveLeave.push({ id: uid('lv'), employeeId: empId, year, entitled: 0, used: 1, note, source: 'timesheet', date });
+    }
+  } else if(existingIdx>=0){
+    state.incentiveLeave.splice(existingIdx, 1);
+  }
 }
 function updTimesheetSched(empId, field, value){
   const run = state.runs.find(r=>r.id===currentRunId);
@@ -2158,12 +2195,13 @@ function confirmAddEmployeeToRun(){
   const emp = empById(empId);
   const run = state.runs.find(r=>r.id===currentRunId);
   const prev = lastEntryForEmployee(empId);
+  const d = scheduledDeductionsForRun(empId, run);
   run.entries.push({ employeeId: empId, hoursWorked:0, lateMinutes:0, otHours:0, otApproved:false, restDayHours:0, holidayDays:0,
     commission:0, thirteenthMonth:0, incentiveLeaveDays:0, incentiveLeavePay:0, allowanceOverride:"", adjustment:0, applyStatutory:true,
     sss: (eligibleForStatutory(emp,'sss') && prev) ? num(prev.sss) : 0,
     philhealth: (eligibleForStatutory(emp,'philhealth') && prev) ? num(prev.philhealth) : 0,
     pagibig: (eligibleForStatutory(emp,'pagibig') && prev) ? num(prev.pagibig) : 0,
-    loanDeduction: scheduledLoanDeductionForRun(empId, run), cashAdvanceDeduction:0, otherDeduction:0 });
+    loanDeduction: d.loan, cashAdvanceDeduction: d.cashAdvance, otherDeduction:0 });
   markDirty(); closeModal(); renderRunDetail();
 }
 function removeFromRun(empId){
@@ -2787,7 +2825,7 @@ function addProductionSplitModal(){
     <div class="field" style="grid-column:1/-1;"><label>Pay Period (payroll run to add this to)</label><select id="ps_run">${payPeriodOptions('')}</select></div>
   </div>
   <div class="helpbox">Splits the pool proportionally by actual hours worked (including OT) that month, from each employee's Time Sheet. Anyone marked "Full-time Production Department employee" on their Employee record counts every hour worked; everyone else (like Alfie) only counts hours on days checked "Production?" in their Time Sheet. If someone's total here looks wrong, check both places: their Employee record's Production checkbox, and the day-by-day "Production?" boxes on their Time Sheet. Pick the Pay Period this pool should be added to — the shares logged here will automatically count toward that payroll run's Total Earnings (you can also change this later from the Commission Log).</div>
-  <div id="ps_preview" style="margin-top:10px;"></div>`;
+  <div id="ps_preview" class="table-wrap" style="margin-top:10px;"></div>`;
   const foot = `<button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="saveProductionSplit()">Log Commission Shares</button>`;
   openModal("Compute Production Commission Split", body, foot, {wide:true});
   ['ps_month','ps_pool'].forEach(id=>{
@@ -2947,11 +2985,31 @@ function stepPayday(dateStr, freq){
 // every payday: some are set to "Monthly Only", landing on just one of the two cutoffs a month
 // (e.g. Pag-IBIG loans, deducted every 4th only). Summed across every unpaid scheduled entry that
 // lands on this exact payday, in case more than one loan is due the same cutoff.
+// Splits everything actually scheduled/due on this exact Pay Date into the two payroll-entry
+// deduction buckets by the loan record's own Type — a "Cash Advance" entry goes to Cash Advance,
+// everything else (Loan, Pag-IBIG Loan, Repayment, or any other type) goes to Loan, matching how
+// the Loans & Deductions log already labels these. Previously everything was lumped into Loan
+// regardless of Type, which is why a Cash Advance could show up under the wrong column.
+// Pulling an installment into a payroll entry here IS it actually getting deducted, so this also
+// checks that installment's own "Deducted?" box in the Loans & Deductions log automatically —
+// no separate manual step needed, and it can never be pulled into a second run by mistake. Each
+// marked record remembers which run it was pulled into (deductedRunId) so re-running "🔄 Sync Loan
+// Deductions" on THAT SAME run keeps finding and re-applying it — it only ever locks a record out
+// of a DIFFERENT run.
+function scheduledDeductionsForRun(empId, run){
+  if(!run || !run.payDate) return { loan: 0, cashAdvance: 0 };
+  const due = state.loans.filter(l => l.employeeId===empId && num(l.amount)<0 && l.date===run.payDate &&
+    (l.deducted !== true || l.deductedRunId === run.id));
+  const loan = due.filter(l => l.type !== 'Cash Advance').reduce((a,l)=> a + Math.abs(num(l.amount)), 0);
+  const cashAdvance = due.filter(l => l.type === 'Cash Advance').reduce((a,l)=> a + Math.abs(num(l.amount)), 0);
+  due.forEach(l => { l.deducted = true; l.deductedRunId = run.id; });
+  return { loan, cashAdvance };
+}
+// Kept for anything that only needs the combined figure (e.g. display/estimate contexts) — routes
+// through the same type-aware split above so it can never drift out of sync with it.
 function scheduledLoanDeductionForRun(empId, run){
-  if(!run || !run.payDate) return 0;
-  return state.loans
-    .filter(l => l.employeeId===empId && num(l.amount)<0 && l.deducted!==true && l.date===run.payDate)
-    .reduce((a,l)=> a + Math.abs(num(l.amount)), 0);
+  const d = scheduledDeductionsForRun(empId, run);
+  return d.loan + d.cashAdvance;
 }
 function computeInstallmentSchedule(total, installment, firstDate, freq){
   total = num(total); installment = Math.abs(num(installment));
