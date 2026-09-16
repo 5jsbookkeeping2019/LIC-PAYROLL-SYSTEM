@@ -1775,9 +1775,8 @@ function parseAttendanceDayLabel(label, fallbackYear){
   const day = Number(m[2]);
   return `${fallbackYear}-${String(mon+1).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
 }
-function parseAttendanceWorkbook(workbook, fallbackYear){
-  const sheetName = workbook.SheetNames[0];
-  const ws = workbook.Sheets[sheetName];
+function parseAttendanceWorkbook(workbook, fallbackYear, sheetName){
+  const ws = workbook.Sheets[sheetName || workbook.SheetNames[0]];
   const rows = XLSX.utils.sheet_to_json(ws, {header:1, raw:false, defval:''});
   const blocks = [];
   for(let i=0;i<rows.length-5;i++){
@@ -1820,6 +1819,142 @@ function parseAttendanceWorkbook(workbook, fallbackYear){
   }
   return blocks;
 }
+
+/* ---------- Second supported attendance export format: "User ID: / Name: / Department:" blocks,
+   with a row of day-of-month numbers, followed by a variable number of rows holding that
+   employee's raw punches for the whole period — often several punches jammed into one cell
+   (separated by line breaks and/or runs of spaces), and the punch time itself can be written as
+   24-hour ("08:14"), 12-hour with AM/PM ("5:54pm", "9:10:00 AM"), or occasionally a bare
+   ambiguous hour with no AM/PM at all. This is a messier, free-form biometric export (e.g. the
+   one from "Employee Attendance Record" reports), so this parser is deliberately conservative:
+   it only auto-fills a day's Time In / Time Out when it's confident, and otherwise leaves a note
+   on that day (surfaced in the "please review" list after import) rather than silently guessing
+   at something that affects pay. ---------- */
+const ATT_MONTH_NAMES_FULL = ['january','february','march','april','may','june','july','august','september','october','november','december'];
+// Picks whichever sheet's name matches the payroll run's own month (e.g. a run in September
+// picks a sheet named "September", "SEPTEMBER ", "Sep", etc.) — for a workbook with one tab per
+// month, like the "Employee Attendance Record" exports. Falls back to the first sheet if nothing
+// matches (e.g. single-sheet workbooks, which is all the older format ever used).
+function pickAttendanceSheet(workbook, run){
+  if(!workbook.SheetNames || workbook.SheetNames.length <= 1) return workbook.SheetNames[0];
+  const targetIdx = new Date(run.periodStart+'T00:00:00').getMonth();
+  const targetName = ATT_MONTH_NAMES_FULL[targetIdx];
+  const match = workbook.SheetNames.find(n => {
+    const t = n.trim().toLowerCase();
+    return t === targetName || t.startsWith(targetName.slice(0,3));
+  });
+  return match || workbook.SheetNames[0];
+}
+// Parses one punch token into {h, mm, hadMeridiem}. Accepts "08:14", "17:00:00", "5:54pm",
+// "9:10:00 AM", "10:03 p.m." — returns null (unparseable, not guessed at) for anything else,
+// e.g. "10:0.3pm" (a garbled/typo'd punch on the actual file).
+function parseAttFlexTime(tok){
+  const s = String(tok||'').trim();
+  if(!s) return null;
+  const m = s.match(/^(\d{1,2}):(\d{2})(?::\d{2})?\s*([AaPp]\.?[Mm]\.?)?$/);
+  if(!m) return null;
+  let h = Number(m[1]), mm = Number(m[2]);
+  if(isNaN(h) || isNaN(mm) || mm>59 || h>23) return null;
+  const mer = m[3] ? m[3].toLowerCase().replace(/\./g,'') : null; // 'am' | 'pm' | null
+  if(mer==='pm'){ if(h<12) h+=12; }
+  else if(mer==='am'){ if(h===12) h=0; }
+  if(h>23) return null;
+  return { h, mm, hadMeridiem: !!mer };
+}
+// Turns every raw text fragment found in one employee's one day's cell(s) into that day's
+// Time In / Time Out (and, when there are extra punches, Lunch Out / Lunch In too) — see the
+// block comment above for the reasoning behind each case.
+function buildAttDayFromTokens(tokens){
+  const times = [], statuses = [], unrecognized = [];
+  tokens.forEach(tok=>{
+    if(/^(SAT|SUN|ABSENT|OFF|HOLIDAY|LEAVE|REST\s*DAY)\.?$/i.test(tok)){ statuses.push(tok.toUpperCase()); return; }
+    const parsed = parseAttFlexTime(tok);
+    if(parsed) times.push({...parsed, raw: tok});
+    else unrecognized.push(tok);
+  });
+  // A bare time with no AM/PM marker, appearing anywhere after the day's first punch, with an hour
+  // low enough to plausibly be a 12-hour-shorthand evening time (1–7) is assumed PM — but always
+  // flagged below so it gets a manual check, since this is a genuine guess rather than a sure read.
+  times.forEach((t, idx)=>{ if(!t.hadMeridiem && idx>0 && t.h>=1 && t.h<=7){ t.h += 12; t.inferred = true; } });
+  const toHHMM = t => `${String(t.h).padStart(2,'0')}:${String(t.mm).padStart(2,'0')}`;
+  let timeIn='', timeOut='', lunchOut='', lunchIn='';
+  const notes = [];
+  if(times.length===1){
+    timeIn = toHHMM(times[0]);
+    notes.push(`Only one punch found (${times[0].raw}) — Time Out missing, please verify.`);
+  } else if(times.length===2){
+    timeIn = toHHMM(times[0]); timeOut = toHHMM(times[1]);
+  } else if(times.length===3){
+    // Most common partial pattern: Time In, Lunch Out, then Time Out with no Lunch In punched.
+    timeIn = toHHMM(times[0]); lunchOut = toHHMM(times[1]); timeOut = toHHMM(times[2]);
+  } else if(times.length===4){
+    timeIn = toHHMM(times[0]); lunchOut = toHHMM(times[1]); lunchIn = toHHMM(times[2]); timeOut = toHHMM(times[3]);
+  } else if(times.length>4){
+    timeIn = toHHMM(times[0]); lunchOut = toHHMM(times[1]); lunchIn = toHHMM(times[2]); timeOut = toHHMM(times[times.length-1]);
+    notes.push(`${times.length} punches recorded this day (${times.map(t=>t.raw).join(', ')}) — used the earliest as Time In and latest as Time Out, please verify.`);
+  }
+  const inferredOnes = times.filter(t=>t.inferred);
+  if(inferredOnes.length) notes.push(`Assumed ${inferredOnes.map(t=>`'${t.raw}' = ${toHHMM(t)}`).join(', ')} (no AM/PM on file) — please verify.`);
+  if(unrecognized.length) notes.push(`Unrecognized punch text: ${unrecognized.join(', ')}`);
+  if(times.length===0){
+    // Saturday/Sunday labels aren't flagged — the app already knows which dates are rest days from
+    // the date itself, so a bare "SAT"/"SUN" with no punch is expected, not something to review.
+    const meaningful = statuses.filter(s => s!=='SAT' && s!=='SUN');
+    if(meaningful.length) notes.push(meaningful.join('/'));
+  }
+  return { timeIn, timeOut, lunchOut, lunchIn, note: notes.join(' '), autoFilled:false };
+}
+function parseAttendanceWorkbookByUserID(workbook, sheetName, fallbackYear, fallbackMonth){
+  const ws = workbook.Sheets[sheetName];
+  if(!ws) return [];
+  const rows = XLSX.utils.sheet_to_json(ws, {header:1, raw:false, defval:''});
+  const headers = [];
+  for(let r=0;r<rows.length;r++){
+    const row = rows[r];
+    let idCol=-1, nameCol=-1;
+    for(let c=0;c<row.length;c++){
+      const v = String(row[c]||'').trim();
+      if(v==='User ID:') idCol=c;
+      if(v==='Name:') nameCol=c;
+    }
+    if(idCol>=0 && nameCol>=0) headers.push({r, idCol, nameCol});
+  }
+  const blocks = [];
+  headers.forEach((h, bi)=>{
+    const row = rows[h.r];
+    const empNo = String(row[h.idCol+1]||'').trim();
+    const rawName = String(row[h.nameCol+1]||'').trim();
+    if(!rawName) return;
+    const dayRow = rows[h.r+1] || [];
+    const dayCols = [];
+    for(let c=0;c<dayRow.length;c++){
+      const v = dayRow[c];
+      if(v===undefined || v===null || v==='') continue;
+      const n = Number(String(v).trim());
+      if(Number.isInteger(n) && n>=1 && n<=31) dayCols.push({col:c, day:n});
+    }
+    if(!dayCols.length) return;
+    const blockEnd = (bi+1<headers.length) ? headers[bi+1].r : rows.length;
+    const punchRows = [];
+    for(let r=h.r+2; r<blockEnd; r++) punchRows.push(rows[r]||[]);
+    const days = {};
+    dayCols.forEach(({col, day})=>{
+      const tokens = [];
+      punchRows.forEach(pr=>{
+        const cell = pr[col];
+        if(cell===undefined || cell===null || cell==='') return;
+        String(cell).split('\n').forEach(piece=>{
+          piece.split(/\s{2,}/).forEach(t=>{ const tt=t.trim(); if(tt) tokens.push(tt); });
+        });
+      });
+      if(!tokens.length) return;
+      const date = `${fallbackYear}-${String(fallbackMonth).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+      days[date] = buildAttDayFromTokens(tokens);
+    });
+    blocks.push({ rawName, empNo, days });
+  });
+  return blocks;
+}
 function handleAttendanceFile(file){
   const run = state.runs.find(r=>r.id===currentRunId);
   if(!run){ alert("Open a payroll run first."); return; }
@@ -1830,9 +1965,16 @@ function handleAttendanceFile(file){
       const data = new Uint8Array(e.target.result);
       const workbook = XLSX.read(data, {type:'array'});
       const fallbackYear = new Date(run.periodStart+'T00:00:00').getFullYear();
-      const blocks = parseAttendanceWorkbook(workbook, fallbackYear);
+      const fallbackMonth = new Date(run.periodStart+'T00:00:00').getMonth()+1;
+      // Workbooks with one tab per month (e.g. JULY / AUGUST / SEPTEMBER) — use whichever tab
+      // matches this run's own month; single-sheet workbooks just use their one sheet.
+      const sheetName = pickAttendanceSheet(workbook, run);
+      let blocks = parseAttendanceWorkbook(workbook, fallbackYear, sheetName);
       if(!blocks.length){
-        alert("Couldn't find any employee attendance blocks in this file. Make sure it's the same format as the biometric attendance export (name row, then Time In / Break Out / Break In / Time Out rows per employee).");
+        blocks = parseAttendanceWorkbookByUserID(workbook, sheetName, fallbackYear, fallbackMonth);
+      }
+      if(!blocks.length){
+        alert(`Couldn't find any employee attendance blocks in the "${sheetName}" sheet of this file. This importer supports two formats: (1) a name row followed by Time In / Break Out / Break In / Time Out rows per employee, or (2) "User ID: / Name:" blocks with a row of day numbers and punches underneath. Double-check the sheet/tab and try again.`);
         return;
       }
       importAttendanceIntoRun(run, blocks);
