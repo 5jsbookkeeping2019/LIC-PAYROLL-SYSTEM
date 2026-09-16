@@ -45,13 +45,13 @@ a{color:var(--brand);}
 
 /* Layout */
 #app{display:flex;min-height:100vh;}
-#sidebar{width:220px;flex:0 0 220px;background:var(--brand-dark);color:#fff;display:flex;flex-direction:column;padding:16px 0;}
+#sidebar{width:220px;flex:0 0 220px;background:var(--brand-dark);color:#fff;display:flex;flex-direction:column;padding:16px 0;position:sticky;top:0;height:100vh;align-self:flex-start;overflow-y:auto;}
 #sidebar .brand{padding:0 18px 16px;border-bottom:1px solid rgba(255,255,255,.15);margin-bottom:10px;}
 #sidebar .brand h1{font-size:15px;margin:0 0 2px;font-weight:700;letter-spacing:.2px;}
 #sidebar .brand p{font-size:11px;margin:0;opacity:.75;}
 .navlist{list-style:none;margin:0;padding:0;flex:1;}
 .navlist li{margin:0;}
-.navbtn{display:flex;align-items:center;gap:10px;width:100%;text-align:left;background:none;border:none;color:#e7ede9;padding:10px 18px;font-size:13.5px;font-weight:500;opacity:.85;border-left:3px solid transparent;}
+.navbtn{display:flex;align-items:center;gap:10px;width:100%;text-align:left;background:none;border:none;color:#e7ede9;padding:10px 18px;font-size:13.5px;font-weight:500;opacity:.85;border-left:3px solid transparent;text-decoration:none;cursor:pointer;}
 .navbtn:hover{background:rgba(255,255,255,.06);opacity:1;}
 .navbtn.active{background:rgba(255,255,255,.1);opacity:1;border-left-color:#fff;}
 .navbtn .ic{font-size:15px;width:18px;text-align:center;}
@@ -87,7 +87,11 @@ a{color:var(--brand);}
 .card .note{font-size:11.5px;color:var(--ink-soft);margin-top:4px;}
 
 .section{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);margin-bottom:18px;}
-.section > .section-head{padding:14px 18px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;}
+/* Pins every section's title/description/filter-buttons row right below the topbar (56px tall,
+   always the same height since #pageSub is always empty) so it — and the sidebar and topbar above
+   it — all stay in view no matter how far you scroll down a long table; only the table body itself
+   scrolls underneath all three. */
+.section > .section-head{padding:14px 18px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;position:sticky;top:56px;background:var(--panel);z-index:15;box-shadow:0 1px 0 var(--line);}
 .section > .section-head h3{margin:0;font-size:14.5px;}
 .section > .section-head .desc{font-size:12px;color:var(--ink-soft);margin-top:2px;}
 .section-body{padding:16px 18px;}
@@ -431,7 +435,7 @@ async function loadStateFromCloud(){
     state = defaultState();
     await saveStateToCloud(true);
   }
-  dirty = false; updateSaveBtn(); render();
+  dirty = false; updateSaveBtn(); initPageFromHash(); render();
 }
 async function saveStateToCloud(silent){
   if(autosaveTimer){ clearTimeout(autosaveTimer); autosaveTimer = null; } // a save is happening now, no need for the pending autosave tick too
@@ -835,19 +839,35 @@ let payrollDetailMode = false;
 let payslipViewEmpId = null; // when set, Payslips page shows just this one employee with Prev/Next nav
 let runFilter = 'all'; // Payroll Run detail table row filter — see RUN_FILTERS below
 
+// Each nav item is a real link (href="#pageId") rather than only a JS-click button — that's what
+// lets a tab be opened directly in a NEW browser tab (ctrl/cmd-click, middle-click, or right-click
+// "Open in new tab"), landing on that exact page instead of always starting over at the Dashboard.
+// Clicking it normally still just changes location.hash, which the 'hashchange' listener below
+// converts into the actual page switch — one single path handles both cases.
 function buildNav(){
   const nav = document.getElementById('navlist');
   nav.innerHTML = PAGES.map(p => `
-    <li><button class="navbtn ${p.id===currentPage?'active':''}" data-page="${p.id}">
+    <li><a class="navbtn ${p.id===currentPage?'active':''}" href="#${p.id}">
       <span class="ic">${p.icon}</span><span>${p.label}</span>
-    </button></li>`).join('');
-  nav.querySelectorAll('.navbtn').forEach(btn=>{
-    btn.addEventListener('click', ()=>{
-      currentPage = btn.dataset.page;
-      if(currentPage === 'payroll') payrollDetailMode = false;
-      render();
-    });
-  });
+    </a></li>`).join('');
+}
+// Reads whichever page id is currently in the URL hash and, if it's a real page and different
+// from what's already showing, switches to it (and re-renders). Used both for normal in-app clicks
+// on a nav link and for the browser's own back/forward buttons.
+function applyHashToCurrentPage(){
+  const hash = (location.hash || '').replace('#','');
+  if(!hash || !PAGES.some(p=>p.id===hash) || hash===currentPage) return;
+  currentPage = hash;
+  if(currentPage === 'payroll') payrollDetailMode = false;
+  render();
+}
+window.addEventListener('hashchange', applyHashToCurrentPage);
+// Called once, right before the very first render after the cloud data has loaded — so a URL that
+// already has a page hash in it (e.g. opened via ctrl/cmd-click from another tab, or a bookmark)
+// opens straight to that page instead of always landing on the Dashboard first.
+function initPageFromHash(){
+  const hash = (location.hash || '').replace('#','');
+  if(hash && PAGES.some(p=>p.id===hash)) currentPage = hash;
 }
 
 function render(){
