@@ -1257,12 +1257,12 @@ function eligibleForStatutory(emp, type){
 function syncLoanDeductionsForRun(runId){
   const run = state.runs.find(r=>r.id===runId);
   if(!run) return;
-  if(!confirm("This will replace every employee's Loan/Cash Advance deduction in this run with whatever is actually scheduled for this exact Pay Date (" + fmtDate(run.payDate) + ") in Loans & Deductions — overwriting current values. Continue?")) return;
+  if(!confirm("This will recompute each employee's Loan/Cash Advance figure from whatever is actually scheduled for this exact Pay Date (" + fmtDate(run.payDate) + ") in Loans & Deductions — but only for employees who actually have a tracked Loan/Cash Advance record there. A manually-typed amount for someone with no record in Loans & Deductions (not tied to any schedule) is left exactly as-is. Continue?")) return;
   let count = 0;
   run.entries.forEach(en=>{
     const d = scheduledDeductionsForRun(en.employeeId, run);
-    en.loanDeduction = d.loan;
-    en.cashAdvanceDeduction = d.cashAdvance;
+    if(d.loanManaged) en.loanDeduction = d.loan;
+    if(d.cashAdvanceManaged) en.cashAdvanceDeduction = d.cashAdvance;
     count++;
   });
   markDirty(); renderRunDetail();
@@ -1419,7 +1419,7 @@ function renderRunDetail(){
         <button class="btn" onclick="document.getElementById('attendanceFileInput').click()" title="Upload the biometric attendance Excel export for this period to auto-fill hours worked / late minutes">📥 Import Attendance (Excel)</button>
         <input type="file" id="attendanceFileInput" accept=".xlsx,.xls" style="display:none" onchange="if(this.files[0]) handleAttendanceFile(this.files[0]); this.value='';">
         ${isLastCutoffOfMonth(run) ? `<button class="btn" onclick="autoCalcStatutory('${run.id}')" title="Combines this cutoff's basic salary with the 1st–15th cutoff, looks up SSS from the bracket table, and carries forward PhilHealth/Pag-IBIG from the last payday">🧮 Auto-Calc SSS/PhilHealth/Pag-IBIG</button>` : ''}
-        <button class="btn" onclick="syncLoanDeductionsForRun('${run.id}')" title="Replaces each employee's Loan/Cash Advance deduction with whatever is actually scheduled for this exact Pay Date — so a monthly-only loan (e.g. Pag-IBIG) doesn't get deducted on a cutoff it isn't due">🔄 Sync Loan Deductions</button>
+        <button class="btn" onclick="syncLoanDeductionsForRun('${run.id}')" title="Recomputes each employee's Loan/Cash Advance from whatever is actually scheduled for this exact Pay Date — so a monthly-only loan (e.g. Pag-IBIG) doesn't get deducted on a cutoff it isn't due. Only touches employees who actually have a tracked record in Loans & Deductions; a manually-typed amount with no record there is left alone.">🔄 Sync Loan Deductions</button>
         <button class="btn" onclick="exportRunCSV()">⬇ Export CSV</button>
         <button class="btn" onclick="openDisbursementList('${run.id}')" title="A focused list of who to pay, how (GCash/Bank/Cash), the account number, and how much — for actually sending out this cutoff's salaries">💸 Disbursement List</button>
         <button class="btn btn-primary" onclick="currentPage='payslips';render()">🧾 View Payslips</button>
@@ -2996,14 +2996,22 @@ function stepPayday(dateStr, freq){
 // marked record remembers which run it was pulled into (deductedRunId) so re-running "🔄 Sync Loan
 // Deductions" on THAT SAME run keeps finding and re-applying it — it only ever locks a record out
 // of a DIFFERENT run.
+// loanManaged/cashAdvanceManaged say whether this employee has ANY record at all of that type in
+// Loans & Deductions (an installment plan, or even just a one-off logged entry) — regardless of
+// whether anything is due today. Sync only ever overwrites a bucket that's actually "managed" this
+// way; a bucket with zero records is left alone, so a plain manually-typed Loan/Cash Advance amount
+// that was never tied to a schedule (like a one-off entered straight into the payroll entry) never
+// gets silently wiped out to ₱0 just because there's nothing to match it against.
 function scheduledDeductionsForRun(empId, run){
-  if(!run || !run.payDate) return { loan: 0, cashAdvance: 0 };
-  const due = state.loans.filter(l => l.employeeId===empId && num(l.amount)<0 && l.date===run.payDate &&
-    (l.deducted !== true || l.deductedRunId === run.id));
+  if(!run || !run.payDate) return { loan: 0, cashAdvance: 0, loanManaged: false, cashAdvanceManaged: false };
+  const allForEmp = state.loans.filter(l => l.employeeId===empId);
+  const loanManaged = allForEmp.some(l => l.type !== 'Cash Advance');
+  const cashAdvanceManaged = allForEmp.some(l => l.type === 'Cash Advance');
+  const due = allForEmp.filter(l => num(l.amount)<0 && l.date===run.payDate && (l.deducted !== true || l.deductedRunId === run.id));
   const loan = due.filter(l => l.type !== 'Cash Advance').reduce((a,l)=> a + Math.abs(num(l.amount)), 0);
   const cashAdvance = due.filter(l => l.type === 'Cash Advance').reduce((a,l)=> a + Math.abs(num(l.amount)), 0);
   due.forEach(l => { l.deducted = true; l.deductedRunId = run.id; });
-  return { loan, cashAdvance };
+  return { loan, cashAdvance, loanManaged, cashAdvanceManaged };
 }
 // Kept for anything that only needs the combined figure (e.g. display/estimate contexts) — routes
 // through the same type-aware split above so it can never drift out of sync with it.
