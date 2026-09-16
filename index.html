@@ -2971,6 +2971,8 @@ function computeBalancesByType(){
   return bal;
 }
 let loanFilterEmpId = 'all';
+let loanFilterType = 'all';
+const LOAN_TYPES = ['Loan', 'Cash Advance', 'Pag-IBIG Loan', 'Repayment'];
 function renderLoans(root){
   const filterEmps = sortByName(activeEmployees());
   root.innerHTML = `
@@ -2982,6 +2984,10 @@ function renderLoans(root){
           <option value="all" ${loanFilterEmpId==='all'?'selected':''}>All Employees</option>
           ${filterEmps.map(e=>`<option value="${e.id}" ${loanFilterEmpId===e.id?'selected':''}>${esc(e.name)}</option>`).join('')}
         </select>
+        <select id="loanFilterTypeSel" title="Show only this type of record">
+          <option value="all" ${loanFilterType==='all'?'selected':''}>All Types</option>
+          ${LOAN_TYPES.map(t=>`<option value="${esc(t)}" ${loanFilterType===t?'selected':''}>${esc(t)}</option>`).join('')}
+        </select>
         <button class="btn" onclick="addInstallmentPlanModal()">+ Set Up Installment Plan</button>
         <button class="btn btn-primary" onclick="addLoanModal()">+ Add Entry</button>
       </div>
@@ -2989,17 +2995,24 @@ function renderLoans(root){
     <div class="section-body"><div class="table-wrap" id="loanTableWrap"></div></div>
   </div>`;
   document.getElementById('loanFilterSel').addEventListener('change', function(){ loanFilterEmpId = this.value; renderLoanTable(); });
+  document.getElementById('loanFilterTypeSel').addEventListener('change', function(){ loanFilterType = this.value; renderLoanTable(); });
   renderLoanTable();
 }
 function renderLoanTable(){
   const wrap = document.getElementById('loanTableWrap'); if(!wrap) return;
   const byType = computeBalancesByType();
   const emps = sortByName(activeEmployees()).filter(e => loanFilterEmpId==='all' || e.id===loanFilterEmpId);
-  const list = [...state.loans].filter(l => loanFilterEmpId==='all' || l.employeeId===loanFilterEmpId).sort((a,b)=> new Date(b.date)-new Date(a.date));
+  const list = [...state.loans]
+    .filter(l => loanFilterEmpId==='all' || l.employeeId===loanFilterEmpId)
+    .filter(l => loanFilterType==='all' || l.type===loanFilterType)
+    .sort((a,b)=> new Date(b.date)-new Date(a.date));
   const balanceLines = emps.map(e=>{
     const t = byType[e.id];
     if(!t) return '';
-    const parts = Object.keys(t).filter(k=>Math.abs(t[k])>0.005).map(k=>`${esc(k)}: ${peso(t[k])}`);
+    const parts = Object.keys(t)
+      .filter(k=>Math.abs(t[k])>0.005)
+      .filter(k=> loanFilterType==='all' || k===loanFilterType)
+      .map(k=>`${esc(k)}: ${peso(t[k])}`);
     if(!parts.length) return '';
     return `<b>${esc(e.name)}</b> — ${parts.join(' &nbsp;·&nbsp; ')}`;
   }).filter(Boolean);
