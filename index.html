@@ -884,7 +884,65 @@ function render(){
   };
   document.getElementById('pageSub').textContent = '';
   (renderers[currentPage] || renderDashboard)(content);
+  refreshStickyOffsets();
 }
+
+// Keeps every "frozen" bar at the top of a page/table correctly stacked instead of each one
+// independently sticking to the same spot and covering the others up. Two separate contexts:
+//  - Page-level: #topbar (56px, constant since #pageSub is always left blank above) -> the page's
+//    own .section-head title bar -> a leading instructional helpbox shown right below it, before
+//    the section's real content (e.g. Payslips' "Use Download PDF..." note).
+//  - Table-level: inside one .table-wrap's own internal scroll area, a leading helpbox (e.g.
+//    Loans & Deductions' "Current balances still owed..." note) -> then that table's own sticky
+//    header row, pushed down to sit right below the helpbox instead of overlapping it.
+// Section-head height isn't a fixed constant (it can wrap to more lines depending on how many
+// buttons/filters a given page shows), so the offsets below are measured from the real, current
+// rendered DOM rather than hardcoded — this function must be re-run any time that DOM changes.
+function refreshStickyOffsets(){
+  const content = document.getElementById('content');
+  if(!content) return;
+  const TOPBAR_H = 56;
+  let pageTop = TOPBAR_H;
+  const head = content.querySelector('.section > .section-head');
+  if(head){
+    head.style.top = pageTop + 'px';
+    pageTop += head.offsetHeight;
+  }
+  content.querySelectorAll('.section > .section-body > .helpbox:first-child').forEach(hb=>{
+    hb.style.position = 'sticky';
+    hb.style.top = pageTop + 'px';
+    hb.style.zIndex = '14';
+    hb.style.background = 'var(--panel)';
+    hb.style.boxShadow = '0 1px 0 var(--line)';
+  });
+
+  document.querySelectorAll('.table-wrap').forEach(tw=>{
+    const hb = tw.querySelector(':scope > .helpbox:first-child');
+    if(!hb) return;
+    hb.style.position = 'sticky';
+    hb.style.top = '0px';
+    hb.style.zIndex = '6';
+    hb.style.background = '#fff';
+    hb.style.boxShadow = '0 1px 0 var(--line)';
+    const localTop = hb.offsetHeight;
+    tw.querySelectorAll(':scope > table > thead th').forEach(th=>{ th.style.top = localTop + 'px'; });
+  });
+}
+let _stickyRAF = null;
+function scheduleStickyRefresh(){
+  if(_stickyRAF) return;
+  _stickyRAF = requestAnimationFrame(()=>{ _stickyRAF = null; refreshStickyOffsets(); });
+}
+// A page's own "just rebuild this one table/section" functions (renderLoanTable, and similar
+// partial-refresh functions on other tabs) don't each call refreshStickyOffsets() themselves —
+// this observer catches every DOM change under #content, including those, and re-measures once
+// per frame so sticky offsets never go stale after an edit, filter change, add, or delete.
+(function watchContentForStickyRefresh(){
+  const content = document.getElementById('content');
+  if(content && window.MutationObserver){
+    new MutationObserver(scheduleStickyRefresh).observe(content, { childList:true, subtree:true });
+  }
+})();
 
 /* ---------- Modal helper ---------- */
 function openModal(title, bodyHtml, footHtml, opts){
@@ -1277,16 +1335,19 @@ function eligibleForStatutory(emp, type){
 function syncLoanDeductionsForRun(runId){
   const run = state.runs.find(r=>r.id===runId);
   if(!run) return;
-  if(!confirm("This will recompute each employee's Loan/Cash Advance figure from whatever is actually scheduled for this exact Pay Date (" + fmtDate(run.payDate) + ") in Loans & Deductions — but only for employees who actually have a tracked Loan/Cash Advance record there. A manually-typed amount for someone with no record in Loans & Deductions (not tied to any schedule) is left exactly as-is. Continue?")) return;
-  let count = 0;
+  if(!confirm("This will pull in any Loan/Cash Advance amount that is actually scheduled for this exact Pay Date (" + fmtDate(run.payDate) + ") in Loans & Deductions, for employees who have a tracked record there. It will NOT zero out or change an existing figure just because nothing happens to be scheduled on this exact date — it only fills in/updates a figure when something is actually due. Continue?")) return;
+  let count = 0, updated = 0;
   run.entries.forEach(en=>{
     const d = scheduledDeductionsForRun(en.employeeId, run);
-    if(d.loanManaged) en.loanDeduction = d.loan;
-    if(d.cashAdvanceManaged) en.cashAdvanceDeduction = d.cashAdvance;
+    // Only ever overwrite when there's a real, dated record backing the new number — an employee
+    // who has SOME loan/CA record somewhere but nothing due on this exact payday keeps whatever
+    // figure is already on their entry untouched (manual or otherwise), instead of being zeroed.
+    if(d.loanManaged && d.loan > 0){ en.loanDeduction = d.loan; updated++; }
+    if(d.cashAdvanceManaged && d.cashAdvance > 0){ en.cashAdvanceDeduction = d.cashAdvance; updated++; }
     count++;
   });
   markDirty(); renderRunDetail();
-  toast(`Synced Loan/Cash Advance deductions for ${count} employee${count===1?'':'s'} against this Pay Date's schedule.`);
+  toast(`Checked ${count} employee${count===1?'':'s'} against this Pay Date's schedule — updated ${updated} figure${updated===1?'':'s'} that had something actually due. Nothing else was touched.`);
 }
 function autoCalcStatutory(runId){
   const run = state.runs.find(r=>r.id===runId);
@@ -1439,7 +1500,7 @@ function renderRunDetail(){
         <button class="btn" onclick="document.getElementById('attendanceFileInput').click()" title="Upload the biometric attendance Excel export for this period to auto-fill hours worked / late minutes">📥 Import Attendance (Excel)</button>
         <input type="file" id="attendanceFileInput" accept=".xlsx,.xls" style="display:none" onchange="if(this.files[0]) handleAttendanceFile(this.files[0]); this.value='';">
         ${isLastCutoffOfMonth(run) ? `<button class="btn" onclick="autoCalcStatutory('${run.id}')" title="Combines this cutoff's basic salary with the 1st–15th cutoff, looks up SSS from the bracket table, and carries forward PhilHealth/Pag-IBIG from the last payday">🧮 Auto-Calc SSS/PhilHealth/Pag-IBIG</button>` : ''}
-        <button class="btn" onclick="syncLoanDeductionsForRun('${run.id}')" title="Recomputes each employee's Loan/Cash Advance from whatever is actually scheduled for this exact Pay Date — so a monthly-only loan (e.g. Pag-IBIG) doesn't get deducted on a cutoff it isn't due. Only touches employees who actually have a tracked record in Loans & Deductions; a manually-typed amount with no record there is left alone.">🔄 Sync Loan Deductions</button>
+        <button class="btn" onclick="syncLoanDeductionsForRun('${run.id}')" title="Pulls in any Loan/Cash Advance amount actually scheduled for this exact Pay Date from Loans & Deductions. Never zeroes out an existing figure just because nothing is scheduled on this exact date — only fills in/updates when something is really due, so manually-typed amounts are always safe.">🔄 Sync Loan Deductions</button>
         <button class="btn" onclick="exportRunCSV()">⬇ Export CSV</button>
         <button class="btn" onclick="openDisbursementList('${run.id}')" title="A focused list of who to pay, how (GCash/Bank/Cash), the account number, and how much — for actually sending out this cutoff's salaries">💸 Disbursement List</button>
         <button class="btn btn-primary" onclick="currentPage='payslips';render()">🧾 View Payslips</button>
