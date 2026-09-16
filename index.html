@@ -1406,6 +1406,8 @@ function renderRunDetail(){
       <div><h3>Run: ${fmtDate(run.periodStart)} – ${fmtDate(run.periodEnd)}</h3><div class="desc">Pay date ${fmtDate(run.payDate)} · Check "Apply" to deduct SSS/PhilHealth/Pag-IBIG this cutoff (usually once a month).</div></div>
       <div class="flexrow no-print">
         <button class="btn" onclick="addEmployeeToRun()">+ Add Employee</button>
+        <button class="btn" onclick="openEntryEditModal()" title="Edit one employee's payroll entry at a time, picked from a dropdown, instead of scrolling the wide table below">✏️ Edit Payroll Entries</button>
+        <button class="btn" onclick="openTimesheetPicker()" title="Open the Time Sheet for any employee in this run, picked from a dropdown">🕐 Edit Timesheet</button>
         <button class="btn" onclick="document.getElementById('attendanceFileInput').click()" title="Upload the biometric attendance Excel export for this period to auto-fill hours worked / late minutes">📥 Import Attendance (Excel)</button>
         <input type="file" id="attendanceFileInput" accept=".xlsx,.xls" style="display:none" onchange="if(this.files[0]) handleAttendanceFile(this.files[0]); this.value='';">
         ${isLastCutoffOfMonth(run) ? `<button class="btn" onclick="autoCalcStatutory('${run.id}')" title="Combines this cutoff's basic salary with the 1st–15th cutoff, looks up SSS from the bracket table, and carries forward PhilHealth/Pag-IBIG from the last payday">🧮 Auto-Calc SSS/PhilHealth/Pag-IBIG</button>` : ''}
@@ -1586,6 +1588,18 @@ function openTimesheetModal(empId){
   markDirty();
   renderTimesheetModal(empId);
 }
+// Opens the Time Sheet modal starting from the alphabetically-first employee in the run — used by
+// the run header's "🕐 Edit Timesheet" button, so you don't have to hunt for someone's row in the
+// wide table just to reach their Time Sheet button.
+function openTimesheetPicker(){
+  const run = state.runs.find(r=>r.id===currentRunId);
+  if(!run || !run.entries.length){ alert('No employees in this run yet — click "+ Add Employee" first.'); return; }
+  const sorted = sortEntriesByName(run.entries);
+  openTimesheetModal(sorted[0].employeeId);
+}
+function timesheetHasData(en){
+  return (en.timesheet||[]).some(d=>d.timeIn || d.timeOut);
+}
 function renderTimesheetModal(empId){
   const run = state.runs.find(r=>r.id===currentRunId);
   const en = run && run.entries.find(e=>e.employeeId===empId);
@@ -1620,12 +1634,19 @@ function renderTimesheetModal(empId){
       <td style="text-align:center;"><input type="checkbox" data-idx="${idx}" data-field="isProduction" ${day.isProduction ? 'checked' : ''} title="Check only for a day this person actually worked in the Production Department (e.g. Alfie helping out that day)." onchange="updTimesheetDay('${empId}',${idx},'isProduction',this.checked)"></td>
     </tr>`;
   }).join('');
+  const sortedEntries = sortEntriesByName(run.entries);
+  const empOptions = sortedEntries.map(e2=>{
+    const emp2 = empById(e2.employeeId); if(!emp2) return '';
+    const mark = timesheetHasData(e2) ? '✓ ' : '';
+    return `<option value="${emp2.id}" ${emp2.id===empId?'selected':''}>${mark}${esc(emp2.name)}</option>`;
+  }).join('');
   const body = `
-    <div class="form-grid cols3" style="margin-bottom:14px;">
-      <div class="field"><label>Employee</label><input value="${esc(emp.name)}" disabled></div>
+    <div class="form-grid cols3" style="margin-bottom:4px;">
+      <div class="field"><label>Employee</label><select onchange="openTimesheetModal(this.value)">${empOptions}</select></div>
       <div class="field"><label>Work Schedule From (period default)</label><input type="time" data-field="schedFromDefault" value="${en.schedFrom}" onchange="updTimesheetSched('${empId}','schedFrom',this.value)"></div>
       <div class="field"><label>Work Schedule To (period default)</label><input type="time" data-field="schedToDefault" value="${en.schedTo}" onchange="updTimesheetSched('${empId}','schedTo',this.value)"></div>
     </div>
+    <div class="muted" style="font-size:11.5px;margin-bottom:10px;">Pick a name to switch — whatever you change is already saved as you go. ✓ = already has time punches entered.</div>
     <div class="helpbox">Hours Worked, Late, and OT are all computed automatically from Time In / Time Out vs. the Work Schedule. OT past the Schedule To time only counts once at least a full hour has actually been rendered (under 60 minutes earns 0), then rounds to the nearest 30-minute block, and is voided to 0 entirely on any day he clocked in late — staying late doesn't earn OT if he starts late that day. Clocking in early only earns OT in full whole hours (1 hour, 2 hours, 3 hours...) — any leftover minutes that don't complete another full hour are dropped, and anything under a full hour early counts toward neither OT nor Hours Worked at all. Any day worked that falls on a Saturday or Sunday (highlighted below) is counted entirely as Rest Day hours instead — it's kept out of regular Hours Worked/Late/OT and paid at the Rest Day rate instead. If someone works a different shift on specific days (e.g. 1:00 PM–10:00 PM instead of their usual schedule), set that day's Sched In/Out columns (highlighted blue below) — leave them blank on every other day to keep using the period default above. This is saved with the payroll run, but only affects pay once you click "Apply Totals to Payroll Entry" below (and OT still isn't actually paid until the "OT Form?" box is checked on the payroll entry). Check the "Production?" box only on a day this person actually worked in the Production Department (e.g. Alfie helping out there) — this is what the Compute Production Commission Split tool (in Commissions) uses to know which of his hours count, instead of guessing from the Remarks text.</div>
     <div class="table-wrap">
     <table class="ts-table">
@@ -1898,6 +1919,88 @@ function updEntry(empId, field, value){
   else { en[field] = num(value); }
   markDirty();
   renderRunDetail();
+}
+
+/* ===================== EDIT PAYROLL ENTRY (single-employee modal) ===================== */
+// A focused, one-employee-at-a-time alternative to the wide table above — pick a name from the
+// dropdown, edit just that person's entry, switch to the next name without losing anything.
+// Every field writes straight into state the same way the table's inputs do (via updEntry), so
+// the table underneath and this modal always agree.
+function entryHasData(en, c){
+  return num(en.hoursWorked)>0 || num(en.otHours)>0 || num(en.restDayHours)>0 || num(en.holidayDays)>0 ||
+    num(en.commission)>0 || c.logCommission>0 || num(en.thirteenthMonth)>0 || num(en.adjustment)!==0 ||
+    num(en.sss)>0 || num(en.philhealth)>0 || num(en.pagibig)>0;
+}
+function openEntryEditModal(empId){
+  const run = state.runs.find(r=>r.id===currentRunId);
+  if(!run || !run.entries.length){ alert('No employees in this run yet — click "+ Add Employee" first.'); return; }
+  const sorted = sortEntriesByName(run.entries);
+  const validId = (empId && run.entries.some(e=>e.employeeId===empId)) ? empId : sorted[0].employeeId;
+  renderEntryEditModal(validId);
+}
+function renderEntryEditModal(empId){
+  const run = state.runs.find(r=>r.id===currentRunId);
+  const en = run && run.entries.find(e=>e.employeeId===empId);
+  const emp = empById(empId);
+  if(!run || !en || !emp) return;
+  const c = calcEntry(emp, en, run);
+  const sorted = sortEntriesByName(run.entries);
+  const options = sorted.map(e2=>{
+    const emp2 = empById(e2.employeeId); if(!emp2) return '';
+    const c2 = calcEntry(emp2, e2, run);
+    const mark = entryHasData(e2, c2) ? '✓ ' : '';
+    return `<option value="${emp2.id}" ${emp2.id===empId?'selected':''}>${mark}${esc(emp2.name)}</option>`;
+  }).join('');
+  const body = `
+    <div class="field" style="margin-bottom:6px;">
+      <label>Employee</label>
+      <select onchange="renderEntryEditModal(this.value)">${options}</select>
+    </div>
+    <div class="muted" style="font-size:11.5px;margin-bottom:10px;">Pick a name to switch — whatever you change is already saved into this payroll run as you go. ✓ = already has entries filled in.</div>
+    <div class="muted" style="font-size:12px;margin-bottom:14px;">${esc(emp.position)} · ₱${emp.rateDay}/day this period</div>
+
+    <div class="form-grid cols3" style="margin-bottom:14px;">
+      <div class="field"><label>Hours Worked</label><input type="number" step="0.5" value="${en.hoursWorked}" onchange="updEntryModalField('${empId}','hoursWorked',this.value)"></div>
+      <div class="field"><label>Late (min)</label><input type="number" step="1" value="${en.lateMinutes}" onchange="updEntryModalField('${empId}','lateMinutes',this.value)"></div>
+      <div class="field"><label>Rest Day Hrs</label><input type="number" step="0.5" value="${en.restDayHours}" onchange="updEntryModalField('${empId}','restDayHours',this.value)"></div>
+      <div class="field"><label>OT Hours (approved/payable)</label><input type="number" step="0.5" value="${en.otHours}" onchange="updEntryModalField('${empId}','otHours',this.value)" title="Only the APPROVED (to-be-paid) OT hours go here."></div>
+      <div class="field"><label>OT Hours Logged (total worked, opt.)</label><input type="number" step="0.5" value="${en.otHoursLogged||''}" onchange="updEntryModalField('${empId}','otHoursLogged',this.value)" title="For your own attendance record only — never paid, does not affect pay."></div>
+      <div class="field"><label>&nbsp;</label><label class="checkline" style="margin-top:8px;"><input type="checkbox" ${en.otApproved===true?'checked':''} onchange="updEntryModalField('${empId}','otApproved',this.checked)"> OT Form on file (approved)</label></div>
+      <div class="field"><label>Holiday Days</label><input type="number" step="1" value="${en.holidayDays}" onchange="updEntryModalField('${empId}','holidayDays',this.value)"></div>
+      <div class="field"><label>Commission (manual)</label><input type="number" step="0.01" value="${en.commission}" onchange="updEntryModalField('${empId}','commission',this.value)"></div>
+      <div class="field"><label>Log Commission (LIC/Prod, linked)</label><input value="${peso(c.logCommission)}" disabled title="Manage the link from the Commissions tab"></div>
+      <div class="field"><label>13th Month</label><input type="number" step="0.01" value="${en.thirteenthMonth}" onchange="updEntryModalField('${empId}','thirteenthMonth',this.value)"></div>
+      <div class="field"><label>Incentive Leave (Days)</label><input type="number" step="0.5" value="${en.incentiveLeaveDays||0}" onchange="updEntryModalField('${empId}','incentiveLeaveDays',this.value)" title="Days × ${peso(emp.rateDay)}/day = ${peso(c.incentiveLeavePay)}"></div>
+      <div class="field"><label>Allowance override</label><input type="number" step="0.01" placeholder="${emp.allowance}" value="${en.allowanceOverride}" onchange="updEntryModalField('${empId}','allowanceOverride',this.value)"></div>
+    </div>
+
+    <div class="form-grid" style="margin-bottom:14px;">
+      <div class="field"><label>Salary Adjustment</label><input type="number" step="0.01" value="${en.adjustment}" onchange="updEntryModalField('${empId}','adjustment',this.value)"></div>
+      <div class="field"><label>Reason (optional)</label><input type="text" value="${esc(en.adjustmentNote||'')}" placeholder="Why this adjustment exists" onchange="updEntryModalField('${empId}','adjustmentNote',this.value)"></div>
+    </div>
+
+    <div class="helpbox" style="margin-bottom:14px;">Total Earnings: <b>${peso(c.totalEarnings)}</b></div>
+
+    <div class="field" style="margin-bottom:10px;"><label class="checkline"><input type="checkbox" ${en.applyStatutory!==false?'checked':''} onchange="updEntryModalField('${empId}','applyStatutory',this.checked)"> Apply SSS/PhilHealth/Pag-IBIG this cutoff</label></div>
+    <div class="form-grid cols3" style="margin-bottom:14px;">
+      <div class="field"><label>SSS</label><input type="number" step="0.01" value="${en.sss}" onchange="updEntryModalField('${empId}','sss',this.value)" title="${eligibleForStatutory(emp,'sss') ? '' : (emp.sssNo ? 'Marked \"Don\'t deduct\" on this employee\'s record' : 'No SSS No. on file for this employee')}" style="${eligibleForStatutory(emp,'sss')?'':'background:#fff8e6;'}"></div>
+      <div class="field"><label>PhilHealth</label><input type="number" step="0.01" value="${en.philhealth}" onchange="updEntryModalField('${empId}','philhealth',this.value)" title="${eligibleForStatutory(emp,'philhealth') ? '' : (emp.philhealthNo ? 'Marked \"Don\'t deduct\" on this employee\'s record' : 'No PhilHealth No. on file for this employee')}" style="${eligibleForStatutory(emp,'philhealth')?'':'background:#fff8e6;'}"></div>
+      <div class="field"><label>Pag-IBIG</label><input type="number" step="0.01" value="${en.pagibig}" onchange="updEntryModalField('${empId}','pagibig',this.value)" title="${eligibleForStatutory(emp,'pagibig') ? '' : (emp.pagibigNo ? 'Marked \"Don\'t deduct\" on this employee\'s record' : 'No Pag-IBIG No. on file for this employee')}" style="${eligibleForStatutory(emp,'pagibig')?'':'background:#fff8e6;'}"></div>
+      <div class="field"><label>Late Deduction (auto)</label><input value="${peso(c.lateDeduction)}" disabled></div>
+      <div class="field"><label>Loan Deduction</label><input type="number" step="0.01" value="${en.loanDeduction}" onchange="updEntryModalField('${empId}','loanDeduction',this.value)"></div>
+      <div class="field"><label>Cash Advance</label><input type="number" step="0.01" value="${en.cashAdvanceDeduction}" onchange="updEntryModalField('${empId}','cashAdvanceDeduction',this.value)"></div>
+      <div class="field"><label>Other Deduction</label><input type="number" step="0.01" value="${en.otherDeduction}" onchange="updEntryModalField('${empId}','otherDeduction',this.value)"></div>
+    </div>
+
+    <div class="helpbox" style="margin-bottom:0;">Total Deductions: <b>${peso(c.totalDeductions)}</b> &nbsp;·&nbsp; Take-Home: <b>${peso(c.takeHome)}</b></div>
+  `;
+  const foot = `<button class="btn" onclick="closeModal();openTimesheetModal('${empId}');" title="Switch to this employee's Time Sheet">🕐 Time Sheet</button>
+    <button class="btn btn-primary" onclick="closeModal()">Close</button>`;
+  openModal(`✏️ Edit Payroll Entry — ${esc(emp.name)}`, body, foot, {wide:true});
+}
+function updEntryModalField(empId, field, value){
+  updEntry(empId, field, value); // same assignment logic as the table's inputs; also re-renders the table underneath
+  renderEntryEditModal(empId); // re-render just this modal, keeping the same employee selected
 }
 function addEmployeeToRun(){
   const run = state.runs.find(r=>r.id===currentRunId);
