@@ -2899,12 +2899,29 @@ function setCommissionRun(id, runId){
   toast(runId ? "Linked to payroll run — it will now count toward that run's Total Earnings." : "Unlinked from payroll.");
 }
 let commTypeFilter = 'all';
+let commFilterEmpId = 'all';
+let commFilterYear = 'all';
+let commFilterMonth = 'all';
 function renderCommissions(root){
+  const filterEmps = sortByName(activeEmployees());
+  const years = Array.from(new Set(state.commissions.map(c=>new Date(c.date+'T00:00:00').getFullYear()))).sort((a,b)=>b-a);
   root.innerHTML = `
   <div class="section">
     <div class="section-head">
       <div><h3>Commission Log</h3><div class="desc">Track 5JS/LIC/Production commission claims per employee.</div></div>
       <div class="flexrow no-print">
+        <select id="comm_emp_filter" title="Show only this employee's commissions">
+          <option value="all" ${commFilterEmpId==='all'?'selected':''}>All Employees</option>
+          ${filterEmps.map(e=>`<option value="${e.id}" ${commFilterEmpId===e.id?'selected':''}>${esc(e.name)}</option>`).join('')}
+        </select>
+        <select id="comm_year_filter" title="Show only this year">
+          <option value="all" ${commFilterYear==='all'?'selected':''}>All Years</option>
+          ${years.map(y=>`<option value="${y}" ${String(commFilterYear)===String(y)?'selected':''}>${y}</option>`).join('')}
+        </select>
+        <select id="comm_month_filter" title="Show only this month">
+          <option value="all" ${commFilterMonth==='all'?'selected':''}>All Months</option>
+          ${MONTH_NAMES.map((m,i)=>`<option value="${i+1}" ${String(commFilterMonth)===String(i+1)?'selected':''}>${m}</option>`).join('')}
+        </select>
         <select id="comm_type_filter">
           <option value="all">All Types</option>
           <option value="LIC">LIC only</option>
@@ -2920,12 +2937,18 @@ function renderCommissions(root){
   const sel = document.getElementById('comm_type_filter');
   sel.value = commTypeFilter;
   sel.addEventListener('change', ()=>{ commTypeFilter = sel.value; renderCommTable(); });
+  document.getElementById('comm_emp_filter').addEventListener('change', function(){ commFilterEmpId = this.value; renderCommTable(); });
+  document.getElementById('comm_year_filter').addEventListener('change', function(){ commFilterYear = this.value; renderCommTable(); });
+  document.getElementById('comm_month_filter').addEventListener('change', function(){ commFilterMonth = this.value; renderCommTable(); });
   renderCommTable();
 }
 function renderCommTable(){
   const wrap = document.getElementById('commTableWrap'); if(!wrap) return;
   let list = [...state.commissions].sort((a,b)=> new Date(b.date)-new Date(a.date));
   if(commTypeFilter !== 'all') list = list.filter(c=>c.type===commTypeFilter);
+  if(commFilterEmpId !== 'all') list = list.filter(c=>c.employeeId===commFilterEmpId);
+  if(commFilterYear !== 'all') list = list.filter(c=> c.date && new Date(c.date+'T00:00:00').getFullYear()===Number(commFilterYear));
+  if(commFilterMonth !== 'all') list = list.filter(c=> c.date && (new Date(c.date+'T00:00:00').getMonth()+1)===Number(commFilterMonth));
   const total = list.reduce((s,c)=>s+num(c.amount),0);
   wrap.innerHTML = `
   <div class="helpbox">${commTypeFilter==='all'?'All types':esc(commTypeFilter)} — ${list.length} entr${list.length===1?'y':'ies'}, total ${peso(total)}. LIC and Production entries linked to a Pay Period below automatically count toward that payroll run's Total Earnings — 5JS never does (it's paid separately by 5JS).</div>
