@@ -1864,20 +1864,24 @@ function updTimesheetDay(empId, idx, field, value){
   markDirty();
   rerenderTimesheetPreservingFocus(empId);
 }
-// Keeps the Incentive Leave Tracker in sync with the Time Sheet: typing "LWP" into a day's Remarks
-// auto-logs that day as 1 used incentive leave day for that employee/year (same shape as clicking
-// "+ Add / Log Leave" by hand, so it shows up the same way in the tracker's Used count and
-// Notes/Dates column). Editing the remarks away from "LWP" — or clearing it — removes that same
-// auto-logged record again, so toggling it never leaves a stale or duplicate entry behind. This
-// only touches the Tracker (entitlement/used/balance bookkeeping) — it does NOT touch the payroll
-// entry's own "Incentive Leave (Days)" field, so the day still needs that filled in separately if
-// you actually want it paid out as incentive leave on this cutoff.
+// Keeps the Incentive Leave Tracker AND the payroll entry's own "Incentive Leave (Days)" field in
+// sync with the Time Sheet: typing "LWP" into a day's Remarks auto-logs that day as 1 used
+// incentive leave day for that employee/year in the Tracker (same shape as clicking "+ Add / Log
+// Leave" by hand, so it shows up the same way in the tracker's Used count and Notes/Dates column)
+// AND adds 1 day onto this entry's "Incentive Leave (Days)", so the day is actually paid out too —
+// not just logged. Editing the remarks away from "LWP" — or clearing it — removes that same
+// auto-logged Tracker record again AND takes that same 1 day back out of "Incentive Leave (Days)",
+// so toggling it back and forth never leaves a stale/duplicate Tracker entry or a wrong pay amount.
+// The adjustment is a +1/-1 delta on whatever "Incentive Leave (Days)" already held, deliberately —
+// never a hard reset to a recomputed total — so it never clobbers a separate, unrelated number
+// typed in there by hand (e.g. leave for a day with no time sheet row, or from before this existed).
 function syncLeaveFromTimesheetDay(empId, date){
   const run = state.runs.find(r=>r.id===currentRunId);
   const en = run && run.entries.find(e=>e.employeeId===empId);
   const day = en && en.timesheet && en.timesheet.find(d=>d.date===date);
   const isLWP = !!day && String(day.remarks||'').trim().toUpperCase() === 'LWP';
   const existingIdx = state.incentiveLeave.findIndex(l=>l.source==='timesheet' && l.employeeId===empId && l.date===date);
+  const wasLWP = existingIdx >= 0;
   if(isLWP){
     const year = new Date(date+'T00:00:00').getFullYear();
     const note = `1 DAY - ${new Date(date+'T00:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric'}).toUpperCase()}`;
@@ -1890,6 +1894,10 @@ function syncLeaveFromTimesheetDay(empId, date){
     }
   } else if(existingIdx>=0){
     state.incentiveLeave.splice(existingIdx, 1);
+  }
+  if(en){
+    if(isLWP && !wasLWP) en.incentiveLeaveDays = num(en.incentiveLeaveDays) + 1;
+    else if(!isLWP && wasLWP) en.incentiveLeaveDays = Math.max(0, num(en.incentiveLeaveDays) - 1);
   }
 }
 function updTimesheetSched(empId, field, value){
@@ -2638,8 +2646,11 @@ function getLeaveInfoForEmployee(empId, year){
 
 // Per-day breakdown for the payslip's Daily Time Record table — recomputed the same way as the
 // Time Sheet modal / Apply Totals (via resolveDaySchedule + computeDayHours), so the numbers shown
-// here always match what's on the entry's timesheet. Only days with an actual punch (Time In or
-// Time Out recorded) are included — unworked/blank days on the period are skipped.
+// here always match what's on the entry's timesheet. A day is included if it has an actual punch
+// (Time In or Time Out) OR any Remarks text (e.g. "LWP", "Absent", "SAT") — so leave/absence days
+// still show up on the payslip (with Hrs Worked/Late/Undertime/OT all zero, since nothing was
+// actually punched) alongside the Remarks that explains why. A day with neither a punch nor any
+// remarks is truly blank and is skipped, so the table doesn't fill up with every empty rest day.
 // OT hours are only ever shown on the payslip if the entry's "OT Form?" box is checked (a signed
 // Overtime Request Summary Form is on file) — same gate already used for the OT peso amount in
 // Earnings. Unapproved OT was worked but isn't being paid, so it's zeroed out here to avoid
@@ -2649,10 +2660,10 @@ function buildPayslipDailyRows(en){
   const otApproved = en.otApproved === true;
   const schedFromMin = timeToMinutes(en.schedFrom);
   const schedToMin = timeToMinutes(en.schedTo);
-  return en.timesheet.filter(day => day.timeIn || day.timeOut).map(day=>{
+  return en.timesheet.filter(day => day.timeIn || day.timeOut || String(day.remarks||'').trim()).map(day=>{
     const daySched = resolveDaySchedule(day, schedFromMin, schedToMin);
     const {hoursWorked, lateMinutes, otMinutes, undertimeMinutes, isRestDay} = computeDayHours(day, daySched.fromMin, daySched.toMin, daySched.isOverride);
-    return { date: day.date, hoursWorked, lateMinutes, undertimeMinutes, otHours: otApproved ? (otMinutes||0)/60 : 0, isRestDay };
+    return { date: day.date, hoursWorked, lateMinutes, undertimeMinutes, otHours: otApproved ? (otMinutes||0)/60 : 0, isRestDay, remarks: String(day.remarks||'').trim() };
   });
 }
 function payslipHtml(emp, en, run){
@@ -2686,7 +2697,7 @@ function payslipHtml(emp, en, run){
     ${dtrRows.length ? `<div class="payslip-section">
       <div class="payslip-section-title dtr">🗓 Daily Time Record</div>
       <table class="payslip-dtr-table" style="width:100%;">
-      <thead><tr><th>Date</th><th class="num">Hrs Worked</th><th class="num">Late (min)</th><th class="num">Undertime (min)</th><th class="num">OT (hrs)</th></tr></thead>
+      <thead><tr><th>Date</th><th class="num">Hrs Worked</th><th class="num">Late (min)</th><th class="num">Undertime (min)</th><th class="num">OT (hrs)</th><th>Remarks</th></tr></thead>
       <tbody>
       ${dtrRows.map(r=>`<tr>
         <td>${fmtDate(r.date)}${r.isRestDay ? ' <span class="dtr-tag">Rest Day</span>' : ''}</td>
@@ -2694,6 +2705,7 @@ function payslipHtml(emp, en, run){
         <td class="num">${r.lateMinutes}</td>
         <td class="num">${r.undertimeMinutes}</td>
         <td class="num">${r.otHours.toFixed(2)}</td>
+        <td>${esc(r.remarks)}</td>
       </tr>`).join('')}
       </tbody>
       <tfoot><tr class="dtr-total">
@@ -2702,6 +2714,7 @@ function payslipHtml(emp, en, run){
         <td class="num">${dtrRows.reduce((a,r)=>a+r.lateMinutes,0)}</td>
         <td class="num">${dtrRows.reduce((a,r)=>a+r.undertimeMinutes,0)}</td>
         <td class="num">${dtrRows.reduce((a,r)=>a+r.otHours,0).toFixed(2)}</td>
+        <td></td>
       </tr></tfoot>
       </table>
     </div>` : ''}
