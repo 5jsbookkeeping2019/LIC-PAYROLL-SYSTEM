@@ -107,6 +107,12 @@ tbody tr:hover{background:#fafbfc;}
    .modal-body .table-wrap) still win where they set their own max-height, but every other table
    across every tab now gets the same "column names stay visible" behavior automatically. */
 .table-wrap thead th{position:sticky;top:0;background:#fff;z-index:5;box-shadow:0 1px 0 var(--line);}
+/* Click-to-sort report tables (see initSortableTables()) — a sort arrow appears on whichever
+   column is currently sorted; every other header just shows a hover highlight as a click hint. */
+table.sortable thead th{cursor:pointer;user-select:none;}
+table.sortable thead th:hover{background:#f1f4f2;}
+table.sortable thead th.sort-asc::after{content:" ▲";font-size:10px;}
+table.sortable thead th.sort-desc::after{content:" ▼";font-size:10px;}
 td input, td select{width:80px;padding:4px 6px;border:1px solid var(--line);border-radius:5px;font-size:12.5px;}
 td input.wide{width:120px;}
 .num{text-align:right;font-variant-numeric:tabular-nums;}
@@ -755,6 +761,11 @@ function calcEntry(emp, entry, run){
   const totalEarnings = basicSalary + restDayPay + otPay + holidayPay + commission + logCommission + thirteenthMonth + incentiveLeavePay + allowance + adjustment;
 
   const lateDeduction = (hr/60) * lateMinutes;
+  // Undertime (leaving before Schedule To on a full-day attempt) is its own figure, computed and
+  // deducted exactly the same way as Late — see computeDayHours. Kept separate from lateDeduction
+  // so a day that's both late AND leaves early is charged for both, correctly, with no overlap.
+  const undertimeMinutes = num(entry.undertimeMinutes);
+  const undertimeDeduction = (hr/60) * undertimeMinutes;
   const applyStat = entry.applyStatutory !== false;
   const sss = applyStat ? num(entry.sss) : 0;
   const philhealth = applyStat ? num(entry.philhealth) : 0;
@@ -763,11 +774,11 @@ function calcEntry(emp, entry, run){
   const cashAdvanceDeduction = num(entry.cashAdvanceDeduction);
   const otherDeduction = num(entry.otherDeduction);
 
-  const totalDeductions = sss + philhealth + pagibig + lateDeduction + loanDeduction + cashAdvanceDeduction + otherDeduction;
+  const totalDeductions = sss + philhealth + pagibig + lateDeduction + undertimeDeduction + loanDeduction + cashAdvanceDeduction + otherDeduction;
   const takeHome = totalEarnings - totalDeductions;
 
   return { hourlyRate:hr, basicSalary, restDayPay, otPay, otApproved, holidayPay, incentiveLeaveDays, incentiveLeavePay, allowance, logCommission, totalEarnings,
-    lateDeduction, sss, philhealth, pagibig, loanDeduction, cashAdvanceDeduction, otherDeduction,
+    lateDeduction, undertimeDeduction, sss, philhealth, pagibig, loanDeduction, cashAdvanceDeduction, otherDeduction,
     totalDeductions, takeHome };
 }
 
@@ -927,6 +938,55 @@ function refreshStickyOffsets(){
     const localTop = hb.offsetHeight;
     tw.querySelectorAll(':scope > table > thead th').forEach(th=>{ th.style.top = localTop + 'px'; });
   });
+  initSortableTables();
+}
+// Makes every report table's column headers clickable to sort by that column — click once for
+// ascending, again for descending; a third click on a different header starts that one fresh.
+// Only tables explicitly marked class="sortable" are touched (the Reports tab's summary tables),
+// never the editable grids elsewhere (Payroll, Loans & Deductions) whose cells hold <input>/
+// <select> fields rather than plain text. Re-runs on every DOM change (see refreshStickyOffsets's
+// caller) but each table is only wired up once, via the data-sort-init marker.
+function initSortableTables(){
+  document.querySelectorAll('#content table.sortable').forEach(table=>{
+    if(table.dataset.sortInit) return;
+    table.dataset.sortInit = '1';
+    const ths = table.querySelectorAll('thead th');
+    ths.forEach((th, colIdx)=>{
+      th.addEventListener('click', ()=> sortTableByColumn(table, colIdx, th));
+    });
+  });
+}
+function sortTableByColumn(table, colIdx, th){
+  const tbody = table.querySelector('tbody');
+  if(!tbody) return;
+  const rows = [...tbody.querySelectorAll('tr')];
+  if(rows.length < 2) return; // nothing meaningful to reorder
+  const nextDir = th.classList.contains('sort-asc') ? 'desc' : 'asc';
+  table.querySelectorAll('thead th').forEach(h=>h.classList.remove('sort-asc','sort-desc'));
+  th.classList.add(nextDir === 'asc' ? 'sort-asc' : 'sort-desc');
+
+  // A cell can carry data-sort="<raw value>" (e.g. an ISO date, or a month index) for a column
+  // whose displayed text wouldn't sort correctly on its own (like "Sep 4, 2026" or "September").
+  // Otherwise fall back to the cell's own text, stripped of ₱/commas so peso amounts sort
+  // numerically; if every row's value in this column parses as a number, sort numerically,
+  // otherwise fall back to a locale-aware (still numeric-substring-smart) string compare.
+  const rawValue = (row) => {
+    const cell = row.children[colIdx];
+    if(!cell) return '';
+    return cell.dataset.sort !== undefined ? cell.dataset.sort : cell.textContent.trim();
+  };
+  const asNumber = (raw) => {
+    const stripped = String(raw).replace(/[₱,\s]/g, '');
+    if(stripped === '' || stripped === '—' || isNaN(Number(stripped))) return null;
+    return Number(stripped);
+  };
+  const entries = rows.map(row => { const raw = rawValue(row); return { row, raw, num: asNumber(raw) }; });
+  const allNumeric = entries.every(e => e.num !== null);
+  entries.sort((a, b) => {
+    const cmp = allNumeric ? (a.num - b.num) : String(a.raw).localeCompare(String(b.raw), undefined, { numeric: true, sensitivity: 'base' });
+    return nextDir === 'asc' ? cmp : -cmp;
+  });
+  entries.forEach(e => tbody.appendChild(e.row)); // tfoot (grand total) stays put after tbody
 }
 let _stickyRAF = null;
 function scheduleStickyRefresh(){
@@ -1123,7 +1183,7 @@ function transferHistoryModal(fromId){
       <label class="checkline"><input type="checkbox" id="th_runs" checked> Payroll run entries (hours, pay, deductions)</label>
       <label class="checkline"><input type="checkbox" id="th_loans" checked> Loans & Cash Advances</label>
       <label class="checkline"><input type="checkbox" id="th_commissions" checked> Commissions</label>
-      <label class="checkline"><input type="checkbox" id="th_leave"> Incentive Leave records</label>
+      <label class="checkline"><input type="checkbox" id="th_leave" checked> Incentive Leave records</label>
     </div>
     <div class="helpbox" style="margin-top:10px;">Leave the date blank to move ALL of that record's history, not just from a certain date forward.</div>
   `;
@@ -1390,7 +1450,7 @@ function createRun(){
     const prev = lastEntryForEmployee(emp.id);
     const d = scheduledDeductionsForRun(emp.id, run);
     run.entries.push({
-      employeeId: emp.id, hoursWorked:0, lateMinutes:0, otHours:0, restDayHours:0, holidayDays:0,
+      employeeId: emp.id, hoursWorked:0, lateMinutes:0, undertimeMinutes:0, otHours:0, restDayHours:0, holidayDays:0,
       commission:0, thirteenthMonth:0, incentiveLeaveDays:0, incentiveLeavePay:0, allowanceOverride:"", adjustment:0,
       applyStatutory: isLastCutoff,
       sss: (eligibleForStatutory(emp,'sss') && prev) ? num(prev.sss) : 0,
@@ -1457,6 +1517,7 @@ function renderRunDetail(){
       <td style="white-space:normal;min-width:150px;">${esc(emp.name)}<br><span class="muted" style="font-size:11px;">${esc(emp.position)} · ₱${emp.rateDay}/day</span><br><button class="btn btn-sm no-print" style="margin-top:4px;" onclick="openTimesheetModal('${emp.id}')" title="Enter daily time in/out for this pay period">🕐 Time Sheet</button></td>
       <td><input type="number" step="0.5" value="${en.hoursWorked}" onchange="updEntry('${emp.id}','hoursWorked',this.value)"></td>
       <td><input type="number" step="1" value="${en.lateMinutes}" onchange="updEntry('${emp.id}','lateMinutes',this.value)"></td>
+      <td><input type="number" step="1" value="${en.undertimeMinutes||0}" onchange="updEntry('${emp.id}','undertimeMinutes',this.value)" title="Minutes left before Schedule To on a full-day attempt — deducted same as Late, per DOLE's actual-time-not-rendered rule."></td>
       <td>
         <input type="number" step="0.5" value="${en.otHours}" onchange="updEntry('${emp.id}','otHours',this.value)" title="Only the APPROVED (to-be-paid) OT hours go here — this is what actually gets multiplied by the OT rate.">
         <input type="number" step="0.5" value="${en.otHoursLogged||''}" placeholder="Total worked (opt.)" onchange="updEntry('${emp.id}','otHoursLogged',this.value)" style="width:100%;font-size:10px;margin-top:2px;padding:2px 4px;" title="Optional: the TOTAL OT hours actually worked, including any hours with no signed OT Form. This is for your own attendance record only — it is never paid and does not affect Basic Salary or Overtime. Leave blank if it's the same as OT Hours.">
@@ -1479,6 +1540,7 @@ function renderRunDetail(){
       <td><input type="number" step="0.01" value="${en.philhealth}" onchange="updEntry('${emp.id}','philhealth',this.value)" title="${eligibleForStatutory(emp,'philhealth') ? '' : (emp.philhealthNo ? 'Marked \"Don\'t deduct\" on this employee\'s record' : 'No PhilHealth No. on file for this employee')}" style="${eligibleForStatutory(emp,'philhealth')?'':'background:#fff8e6;'}"></td>
       <td><input type="number" step="0.01" value="${en.pagibig}" onchange="updEntry('${emp.id}','pagibig',this.value)" title="${eligibleForStatutory(emp,'pagibig') ? '' : (emp.pagibigNo ? 'Marked \"Don\'t deduct\" on this employee\'s record' : 'No Pag-IBIG No. on file for this employee')}" style="${eligibleForStatutory(emp,'pagibig')?'':'background:#fff8e6;'}"></td>
       <td class="num">${peso(c.lateDeduction)}</td>
+      <td class="num">${peso(c.undertimeDeduction)}</td>
       <td><input type="number" step="0.01" value="${en.loanDeduction}" onchange="updEntry('${emp.id}','loanDeduction',this.value)"></td>
       <td><input type="number" step="0.01" value="${en.cashAdvanceDeduction}" onchange="updEntry('${emp.id}','cashAdvanceDeduction',this.value)"></td>
       <td><input type="number" step="0.01" value="${en.otherDeduction}" onchange="updEntry('${emp.id}','otherDeduction',this.value)"></td>
@@ -1517,15 +1579,15 @@ function renderRunDetail(){
       <div class="table-wrap">
       <table>
         <thead><tr>
-          <th>Employee</th><th>Hrs Worked</th><th>Late (min)</th><th>OT Hrs</th><th>OT Form?</th><th>Rest Day Hrs</th><th>Holiday Days</th>
+          <th>Employee</th><th>Hrs Worked</th><th>Late (min)</th><th>Undertime (min)</th><th>OT Hrs</th><th>OT Form?</th><th>Rest Day Hrs</th><th>Holiday Days</th>
           <th>Commission</th><th>Log Commission<br><span class="muted" style="font-weight:400;">(LIC/Prod)</span></th><th>13th Month</th><th>Incentive Leave (Days)</th><th>Allowance</th><th>Adj.</th><th>Total Earnings</th>
-          <th>Apply</th><th>SSS</th><th>PhilHealth</th><th>Pag-IBIG</th><th>Late Ded.</th><th>Loan</th><th>Cash Adv.</th><th>Other Ded.</th><th>Total Ded.</th><th>Take-Home</th><th></th>
+          <th>Apply</th><th>SSS</th><th>PhilHealth</th><th>Pag-IBIG</th><th>Late Ded.</th><th>Undertime Ded.</th><th>Loan</th><th>Cash Adv.</th><th>Other Ded.</th><th>Total Ded.</th><th>Take-Home</th><th></th>
         </tr></thead>
-        <tbody>${shownCount>0 ? rows : `<tr><td colspan="24" class="empty-state">No employees match this filter for this run.</td></tr>`}</tbody>
+        <tbody>${shownCount>0 ? rows : `<tr><td colspan="26" class="empty-state">No employees match this filter for this run.</td></tr>`}</tbody>
         <tfoot><tr style="font-weight:700;background:#fafbfc;">
-          <td colspan="13" class="num">TOTALS</td>
+          <td colspan="14" class="num">TOTALS</td>
           <td class="num">${peso(totalEarnings)}</td>
-          <td colspan="8"></td>
+          <td colspan="9"></td>
           <td class="num">${peso(totalDeductions)}</td>
           <td class="num">${peso(totalTakeHome)}</td><td></td>
         </tr></tfoot>
@@ -1603,10 +1665,17 @@ function isRestDayDate(dateStr){
 const HALF_DAY_PM_FROM_MIN = 13*60; // 1:00 PM
 const HALF_DAY_PM_TO_MIN = 17*60; // 5:00 PM
 const NOON_MINUTES = 12*60; // 12:00 PM
+// Company policy (added per DOLE guidance — deductions must be based on actual time not rendered,
+// computed independently per day, never offset against OT on another day per Labor Code Art. 88):
+// leaving BEFORE Schedule To on a day that otherwise counts as a full day (crossed the half-day
+// threshold, not an override/auto-detected half-day shift) is Undertime — tracked in its own
+// minutes figure, deducted as its own peso line item, exactly parallel to how Late is handled
+// above. Hours Worked itself is deliberately left untouched by this (see the policy comment further
+// up) so the two never double-count the same lost time.
 function computeDayHours(day, schedFromMin, schedToMin, isOverride){
   const isRestDay = isRestDayDate(day.date);
   const tIn = timeToMinutes(day.timeIn), tOut = timeToMinutes(day.timeOut);
-  if(tIn===null || tOut===null) return {hoursWorked:0, lateMinutes:0, otMinutes:0, isRestDay};
+  if(tIn===null || tOut===null) return {hoursWorked:0, lateMinutes:0, otMinutes:0, undertimeMinutes:0, isRestDay};
   if(!isRestDay && !isOverride && tIn>=NOON_MINUTES){
     schedFromMin = HALF_DAY_PM_FROM_MIN; schedToMin = HALF_DAY_PM_TO_MIN; isOverride = true;
   }
@@ -1646,7 +1715,13 @@ function computeDayHours(day, schedFromMin, schedToMin, isOverride){
     }
   }
   const hoursWorked = workedMinutes/60;
-  return {hoursWorked, lateMinutes, otMinutes, isRestDay};
+  // Undertime: left before Schedule To on a day that otherwise counted as a full day attempt — not
+  // an override/half-day shift (those have their own, already-shorter expected schedule, so leaving
+  // "early" relative to a full day's hours doesn't apply). Independent of Late — someone can be both
+  // late AND leave early on the same day, and both get their own deduction, per DOLE's "actual time
+  // not rendered" principle (no offsetting one against the other or against OT on a different day).
+  const undertimeMinutes = (!isRestDay && !isOverride && isFullDay && schedToMin!==null && tOut<schedToMin) ? (schedToMin-tOut) : 0;
+  return {hoursWorked, lateMinutes, otMinutes, undertimeMinutes, isRestDay};
 }
 function ensureTimesheet(en, run, emp){
   const dates = generatePeriodDates(run);
@@ -1696,12 +1771,12 @@ function renderTimesheetModal(empId){
   if(!run || !en || !emp) return;
   const schedFromMin = timeToMinutes(en.schedFrom);
   const schedToMin = timeToMinutes(en.schedTo);
-  let totalHours=0, totalLate=0, totalOt=0, totalRestDay=0, daysWorked=0;
+  let totalHours=0, totalLate=0, totalOt=0, totalRestDay=0, totalUndertime=0, daysWorked=0;
   const rows = en.timesheet.map((day, idx)=>{
     const daySched = resolveDaySchedule(day, schedFromMin, schedToMin);
-    const {hoursWorked, lateMinutes, otMinutes, isRestDay} = computeDayHours(day, daySched.fromMin, daySched.toMin, daySched.isOverride);
+    const {hoursWorked, lateMinutes, otMinutes, undertimeMinutes, isRestDay} = computeDayHours(day, daySched.fromMin, daySched.toMin, daySched.isOverride);
     const otHours = otMinutes/60;
-    if(isRestDay){ totalRestDay += hoursWorked; } else { totalHours += hoursWorked; totalLate += lateMinutes; totalOt += otHours; }
+    if(isRestDay){ totalRestDay += hoursWorked; } else { totalHours += hoursWorked; totalLate += lateMinutes; totalOt += otHours; totalUndertime += undertimeMinutes; }
     if(hoursWorked>0) daysWorked++;
     const dt = new Date(day.date+'T00:00:00');
     const wk = dt.toLocaleDateString('en-PH',{weekday:'short'});
@@ -1717,6 +1792,7 @@ function renderTimesheetModal(empId){
       <td><input type="time" data-idx="${idx}" data-field="timeOut" value="${day.timeOut}" onchange="updTimesheetDay('${empId}',${idx},'timeOut',this.value)"></td>
       <td class="num">${isRestDay ? '—' : hoursWorked.toFixed(2)}</td>
       <td class="num">${isRestDay ? '—' : lateMinutes.toFixed(0)}</td>
+      <td class="num" title="Left before Schedule To on a full-day attempt — deducted separately, same as Late, per DOLE's actual-time-not-rendered rule.">${isRestDay ? '—' : undertimeMinutes.toFixed(0)}</td>
       <td class="num" title="${lateMinutes>0 ? 'Voided — he was late this day' : ''}">${isRestDay ? '—' : otHours.toFixed(2)}</td>
       <td class="num" title="${isRestDay ? 'Saturday/Sunday work — counted as Rest Day, not regular hours' : ''}">${isRestDay ? hoursWorked.toFixed(2) : '—'}</td>
       <td><input type="text" data-idx="${idx}" data-field="remarks" value="${esc(day.remarks)}" placeholder="e.g. Rest Day" title="Type exactly LWP to auto-log this day as 1 used Incentive Leave day for this employee — it'll show up in the Incentive Leave Tracker automatically." onchange="updTimesheetDay('${empId}',${idx},'remarks',this.value)"></td>
@@ -1736,15 +1812,15 @@ function renderTimesheetModal(empId){
       <div class="field"><label>Work Schedule To (period default)</label><input type="time" data-field="schedToDefault" value="${en.schedTo}" onchange="updTimesheetSched('${empId}','schedTo',this.value)"></div>
     </div>
     <div class="muted" style="font-size:11.5px;margin-bottom:10px;">Pick a name to switch — whatever you change is already saved as you go. ✓ = already has time punches entered.</div>
-    <div class="helpbox">Hours Worked, Late, and OT are all computed automatically from Time In / Time Out vs. the Work Schedule. OT past the Schedule To time only counts once at least a full hour has actually been rendered (under 60 minutes earns 0), then rounds to the nearest 30-minute block, and is voided to 0 entirely on any day he clocked in late — staying late doesn't earn OT if he starts late that day. Clocking in early only earns OT in full whole hours (1 hour, 2 hours, 3 hours...) — any leftover minutes that don't complete another full hour are dropped, and anything under a full hour early counts toward neither OT nor Hours Worked at all. Any day worked that falls on a Saturday or Sunday (highlighted below) is counted entirely as Rest Day hours instead — it's kept out of regular Hours Worked/Late/OT and paid at the Rest Day rate instead. If someone works a different shift on specific days (e.g. 1:00 PM–10:00 PM instead of their usual schedule), set that day's Sched In/Out columns (highlighted blue below) — leave them blank on every other day to keep using the period default above. This is saved with the payroll run, but only affects pay once you click "Apply Totals to Payroll Entry" below (and OT still isn't actually paid until the "OT Form?" box is checked on the payroll entry). Check the "Production?" box only on a day this person actually worked in the Production Department (e.g. Alfie helping out there) — this is what the Compute Production Commission Split tool (in Commissions) uses to know which of his hours count, instead of guessing from the Remarks text. Type exactly <b>LWP</b> in a day's Remarks to auto-log that day as 1 used Incentive Leave day in the Incentive Leave Tracker (Entitled/Used/Balance and the Notes/Dates column update by themselves) — clearing or changing that Remarks text removes it from the Tracker again. This only updates the Tracker; it does not by itself pay for that day — still fill in "Incentive Leave (Days)" on the payroll entry if this day should also be paid out.</div>
+    <div class="helpbox">Hours Worked, Late, Undertime, and OT are all computed automatically from Time In / Time Out vs. the Work Schedule. Undertime is minutes left BEFORE Schedule To on a day that otherwise counts as a full day — it's deducted from pay as its own line item, exactly like Late is, per DOLE's rule that deductions must reflect actual time not rendered (Hours Worked itself doesn't shrink for either Late or Undertime, so nothing is subtracted twice). OT past the Schedule To time only counts once at least a full hour has actually been rendered (under 60 minutes earns 0), then rounds to the nearest 30-minute block, and is voided to 0 entirely on any day he clocked in late — staying late doesn't earn OT if he starts late that day. Clocking in early only earns OT in full whole hours (1 hour, 2 hours, 3 hours...) — any leftover minutes that don't complete another full hour are dropped, and anything under a full hour early counts toward neither OT nor Hours Worked at all. Any day worked that falls on a Saturday or Sunday (highlighted below) is counted entirely as Rest Day hours instead — it's kept out of regular Hours Worked/Late/OT and paid at the Rest Day rate instead. If someone works a different shift on specific days (e.g. 1:00 PM–10:00 PM instead of their usual schedule), set that day's Sched In/Out columns (highlighted blue below) — leave them blank on every other day to keep using the period default above. This is saved with the payroll run, but only affects pay once you click "Apply Totals to Payroll Entry" below (and OT still isn't actually paid until the "OT Form?" box is checked on the payroll entry). Check the "Production?" box only on a day this person actually worked in the Production Department (e.g. Alfie helping out there) — this is what the Compute Production Commission Split tool (in Commissions) uses to know which of his hours count, instead of guessing from the Remarks text. Type exactly <b>LWP</b> in a day's Remarks to auto-log that day as 1 used Incentive Leave day in the Incentive Leave Tracker (Entitled/Used/Balance and the Notes/Dates column update by themselves) — clearing or changing that Remarks text removes it from the Tracker again. This only updates the Tracker; it does not by itself pay for that day — still fill in "Incentive Leave (Days)" on the payroll entry if this day should also be paid out.</div>
     <div class="table-wrap">
     <table class="ts-table">
-      <thead><tr><th>Date</th><th>Sched In</th><th>Sched Out</th><th>Time In</th><th>Lunch Out</th><th>Lunch In</th><th>Time Out</th><th class="num">Hrs Worked</th><th class="num">Late (min)</th><th class="num">OT Hrs</th><th class="num">Rest Day Hrs</th><th>Remarks</th><th>Production?</th></tr></thead>
+      <thead><tr><th>Date</th><th>Sched In</th><th>Sched Out</th><th>Time In</th><th>Lunch Out</th><th>Lunch In</th><th>Time Out</th><th class="num">Hrs Worked</th><th class="num">Late (min)</th><th class="num">Undertime (min)</th><th class="num">OT Hrs</th><th class="num">Rest Day Hrs</th><th>Remarks</th><th>Production?</th></tr></thead>
       <tbody>${rows}</tbody>
       <tfoot style="font-weight:700;background:#fafbfc;">
       <tr>
         <td colspan="7">TOTALS (${daysWorked} day${daysWorked===1?'':'s'} worked)</td>
-        <td class="num">${totalHours.toFixed(2)}</td><td class="num">${totalLate.toFixed(0)}</td><td class="num">${totalOt.toFixed(2)}</td><td class="num">${totalRestDay.toFixed(2)}</td><td></td><td></td>
+        <td class="num">${totalHours.toFixed(2)}</td><td class="num">${totalLate.toFixed(0)}</td><td class="num">${totalUndertime.toFixed(0)}</td><td class="num">${totalOt.toFixed(2)}</td><td class="num">${totalRestDay.toFixed(2)}</td><td></td><td></td>
       </tr></tfoot>
     </table>
     </div>`;
@@ -1830,14 +1906,15 @@ function applyTimesheetToEntry(empId){
   if(!en) return;
   const schedFromMin = timeToMinutes(en.schedFrom);
   const schedToMin = timeToMinutes(en.schedTo);
-  let totalHours=0, totalLate=0, totalOt=0, totalRestDay=0;
+  let totalHours=0, totalLate=0, totalOt=0, totalRestDay=0, totalUndertime=0;
   en.timesheet.forEach(day=>{
     const daySched = resolveDaySchedule(day, schedFromMin, schedToMin);
-    const {hoursWorked, lateMinutes, otMinutes, isRestDay} = computeDayHours(day, daySched.fromMin, daySched.toMin, daySched.isOverride);
-    if(isRestDay){ totalRestDay += hoursWorked; } else { totalHours += hoursWorked; totalLate += lateMinutes; totalOt += (otMinutes||0)/60; }
+    const {hoursWorked, lateMinutes, otMinutes, undertimeMinutes, isRestDay} = computeDayHours(day, daySched.fromMin, daySched.toMin, daySched.isOverride);
+    if(isRestDay){ totalRestDay += hoursWorked; } else { totalHours += hoursWorked; totalLate += lateMinutes; totalOt += (otMinutes||0)/60; totalUndertime += undertimeMinutes; }
   });
   en.hoursWorked = Math.round(totalHours*100)/100;
   en.lateMinutes = Math.round(totalLate);
+  en.undertimeMinutes = Math.round(totalUndertime);
   en.otHours = Math.round(totalOt*100)/100;
   en.restDayHours = Math.round(totalRestDay*100)/100;
   markDirty();
@@ -2133,17 +2210,18 @@ function importAttendanceIntoRun(run, blocks){
     // Recompute totals the same way "Apply Totals to Payroll Entry" does, from the timesheet grid.
     const schedFromMin = timeToMinutes(en.schedFrom);
     const schedToMin = timeToMinutes(en.schedTo);
-    let totalHours=0, totalLate=0, totalOt=0, totalRestDay=0;
+    let totalHours=0, totalLate=0, totalOt=0, totalRestDay=0, totalUndertime=0;
     en.timesheet.forEach(day=>{
       const daySched = resolveDaySchedule(day, schedFromMin, schedToMin);
-      const {hoursWorked, lateMinutes, otMinutes, isRestDay} = computeDayHours(day, daySched.fromMin, daySched.toMin, daySched.isOverride);
-      if(isRestDay){ totalRestDay += hoursWorked; } else { totalHours += hoursWorked; totalLate += lateMinutes; totalOt += (otMinutes||0)/60; }
+      const {hoursWorked, lateMinutes, otMinutes, undertimeMinutes, isRestDay} = computeDayHours(day, daySched.fromMin, daySched.toMin, daySched.isOverride);
+      if(isRestDay){ totalRestDay += hoursWorked; } else { totalHours += hoursWorked; totalLate += lateMinutes; totalOt += (otMinutes||0)/60; totalUndertime += undertimeMinutes; }
     });
     en.hoursWorked = Math.round(totalHours*100)/100;
     en.lateMinutes = Math.round(totalLate);
+    en.undertimeMinutes = Math.round(totalUndertime);
     en.otHours = Math.round(totalOt*100)/100;
     en.restDayHours = Math.round(totalRestDay*100)/100;
-    matched.push({ name: emp.name, days: daysWithData, hours: en.hoursWorked, late: en.lateMinutes, ot: en.otHours, restDay: en.restDayHours });
+    matched.push({ name: emp.name, days: daysWithData, hours: en.hoursWorked, late: en.lateMinutes, undertime: en.undertimeMinutes, ot: en.otHours, restDay: en.restDayHours });
   });
   markDirty();
   renderRunDetail();
@@ -2154,8 +2232,8 @@ function showAttendanceImportSummary(matched, unmatched, flaggedNotes, halfDaysA
   const body = `
     <div class="helpbox">Hours Worked, Late (min), OT Hrs, and Rest Day Hrs were filled in automatically from the file and applied to the payroll entries below — OT only counts time worked past each employee's scheduled Time Out once at least a full hour has actually been rendered (under 60 minutes earns 0), rounded to the nearest 30-minute block beyond that, and is voided to 0 on any day they clocked in late. Any day worked on a Saturday or Sunday is counted as Rest Day hours instead of regular hours. Please review — especially anything flagged — before finalizing this run.</div>
     <h4 style="margin:14px 0 6px;">✅ Imported (${matched.length})</h4>
-    <div class="table-wrap"><table><thead><tr><th>Employee</th><th class="num">Days with punches</th><th class="num">Hrs Worked</th><th class="num">Late (min)</th><th class="num">OT Hrs</th><th class="num">Rest Day Hrs</th></tr></thead><tbody>
-    ${matched.map(m=>`<tr><td>${esc(m.name)}</td><td class="num">${m.days}</td><td class="num">${m.hours.toFixed(2)}</td><td class="num">${m.late.toFixed(0)}</td><td class="num">${m.ot.toFixed(2)}</td><td class="num">${m.restDay.toFixed(2)}</td></tr>`).join('') || '<tr><td colspan="6">None</td></tr>'}
+    <div class="table-wrap"><table><thead><tr><th>Employee</th><th class="num">Days with punches</th><th class="num">Hrs Worked</th><th class="num">Late (min)</th><th class="num">Undertime (min)</th><th class="num">OT Hrs</th><th class="num">Rest Day Hrs</th></tr></thead><tbody>
+    ${matched.map(m=>`<tr><td>${esc(m.name)}</td><td class="num">${m.days}</td><td class="num">${m.hours.toFixed(2)}</td><td class="num">${m.late.toFixed(0)}</td><td class="num">${m.undertime.toFixed(0)}</td><td class="num">${m.ot.toFixed(2)}</td><td class="num">${m.restDay.toFixed(2)}</td></tr>`).join('') || '<tr><td colspan="7">None</td></tr>'}
     </tbody></table></div>
     ${unmatched.length ? `<h4 style="margin:14px 0 6px;color:var(--brand-dark);">⚠️ Not matched / needs attention (${unmatched.length})</h4><div class="helpbox">These names on the attendance file couldn't be confidently matched to an employee in this run — nothing was changed for them. Enter their time sheet manually.</div><ul>${unmatched.map(u=>`<li>${esc(u)}</li>`).join('')}</ul>` : ''}
     ${halfDaysApplied.length ? `<h4 style="margin:14px 0 6px;">🕐 "Half day" auto-filled as 1:00 PM–5:00 PM (${halfDaysApplied.length})</h4><div class="helpbox">These days were marked "half day" with no actual punch on file, so they were paid as a 1:00 PM–5:00 PM (4-hour) shift per company policy.</div>
@@ -2222,6 +2300,7 @@ function renderEntryEditModal(empId){
     <div class="form-grid cols3" style="margin-bottom:14px;">
       <div class="field"><label>Hours Worked</label><input type="number" step="0.5" value="${en.hoursWorked}" onchange="updEntryModalField('${empId}','hoursWorked',this.value)"></div>
       <div class="field"><label>Late (min)</label><input type="number" step="1" value="${en.lateMinutes}" onchange="updEntryModalField('${empId}','lateMinutes',this.value)"></div>
+      <div class="field"><label>Undertime (min)</label><input type="number" step="1" value="${en.undertimeMinutes||0}" onchange="updEntryModalField('${empId}','undertimeMinutes',this.value)" title="Minutes left before Schedule To on a full-day attempt"></div>
       <div class="field"><label>Rest Day Hrs</label><input type="number" step="0.5" value="${en.restDayHours}" onchange="updEntryModalField('${empId}','restDayHours',this.value)"></div>
       <div class="field"><label>OT Hours (approved/payable)</label><input type="number" step="0.5" value="${en.otHours}" onchange="updEntryModalField('${empId}','otHours',this.value)" title="Only the APPROVED (to-be-paid) OT hours go here."></div>
       <div class="field"><label>OT Hours Logged (total worked, opt.)</label><input type="number" step="0.5" value="${en.otHoursLogged||''}" onchange="updEntryModalField('${empId}','otHoursLogged',this.value)" title="For your own attendance record only — never paid, does not affect pay."></div>
@@ -2247,6 +2326,7 @@ function renderEntryEditModal(empId){
       <div class="field"><label>PhilHealth</label><input type="number" step="0.01" value="${en.philhealth}" onchange="updEntryModalField('${empId}','philhealth',this.value)" title="${eligibleForStatutory(emp,'philhealth') ? '' : (emp.philhealthNo ? 'Marked \"Don\'t deduct\" on this employee\'s record' : 'No PhilHealth No. on file for this employee')}" style="${eligibleForStatutory(emp,'philhealth')?'':'background:#fff8e6;'}"></div>
       <div class="field"><label>Pag-IBIG</label><input type="number" step="0.01" value="${en.pagibig}" onchange="updEntryModalField('${empId}','pagibig',this.value)" title="${eligibleForStatutory(emp,'pagibig') ? '' : (emp.pagibigNo ? 'Marked \"Don\'t deduct\" on this employee\'s record' : 'No Pag-IBIG No. on file for this employee')}" style="${eligibleForStatutory(emp,'pagibig')?'':'background:#fff8e6;'}"></div>
       <div class="field"><label>Late Deduction (auto)</label><input value="${peso(c.lateDeduction)}" disabled></div>
+      <div class="field"><label>Undertime Deduction (auto)</label><input value="${peso(c.undertimeDeduction)}" disabled></div>
       <div class="field"><label>Loan Deduction</label><input type="number" step="0.01" value="${en.loanDeduction}" onchange="updEntryModalField('${empId}','loanDeduction',this.value)"></div>
       <div class="field"><label>Cash Advance</label><input type="number" step="0.01" value="${en.cashAdvanceDeduction}" onchange="updEntryModalField('${empId}','cashAdvanceDeduction',this.value)"></div>
       <div class="field"><label>Other Deduction</label><input type="number" step="0.01" value="${en.otherDeduction}" onchange="updEntryModalField('${empId}','otherDeduction',this.value)"></div>
@@ -2277,7 +2357,7 @@ function confirmAddEmployeeToRun(){
   const run = state.runs.find(r=>r.id===currentRunId);
   const prev = lastEntryForEmployee(empId);
   const d = scheduledDeductionsForRun(empId, run);
-  run.entries.push({ employeeId: empId, hoursWorked:0, lateMinutes:0, otHours:0, otApproved:false, restDayHours:0, holidayDays:0,
+  run.entries.push({ employeeId: empId, hoursWorked:0, lateMinutes:0, undertimeMinutes:0, otHours:0, otApproved:false, restDayHours:0, holidayDays:0,
     commission:0, thirteenthMonth:0, incentiveLeaveDays:0, incentiveLeavePay:0, allowanceOverride:"", adjustment:0, applyStatutory:true,
     sss: (eligibleForStatutory(emp,'sss') && prev) ? num(prev.sss) : 0,
     philhealth: (eligibleForStatutory(emp,'philhealth') && prev) ? num(prev.philhealth) : 0,
@@ -2293,15 +2373,15 @@ function removeFromRun(empId){
 function exportRunCSV(){
   const run = state.runs.find(r=>r.id===currentRunId);
   if(!run) return;
-  const header = ['Name','Position','Rate/Day','Hours Worked','Late Min','OT Hrs','OT Form?','Rest Day Hrs','Holiday Days','Commission','Log Commission (LIC/Prod)','13th Month','Incentive Leave Days','Incentive Leave Pay','Allowance','Adjustment','Total Earnings','SSS','PhilHealth','Pag-IBIG','Late Ded.','Loan','Cash Advance','Other Ded.','Total Deductions','Take-Home','Payment Method','Bank Name','Account'];
+  const header = ['Name','Position','Rate/Day','Hours Worked','Late Min','Undertime Min','OT Hrs','OT Form?','Rest Day Hrs','Holiday Days','Commission','Log Commission (LIC/Prod)','13th Month','Incentive Leave Days','Incentive Leave Pay','Allowance','Adjustment','Total Earnings','SSS','PhilHealth','Pag-IBIG','Late Ded.','Undertime Ded.','Loan','Cash Advance','Other Ded.','Total Deductions','Take-Home','Payment Method','Bank Name','Account'];
   const lines = [header.join(',')];
   run.entries.forEach(en=>{
     const emp = empById(en.employeeId); if(!emp) return;
     const c = calcEntry(emp, en, run);
     const allowance = c.allowance;
-    const row = [emp.name, emp.position, emp.rateDay, en.hoursWorked, en.lateMinutes, en.otHours, (en.otApproved===true?'Yes':'No'), en.restDayHours, en.holidayDays,
+    const row = [emp.name, emp.position, emp.rateDay, en.hoursWorked, en.lateMinutes, (en.undertimeMinutes||0), en.otHours, (en.otApproved===true?'Yes':'No'), en.restDayHours, en.holidayDays,
       en.commission, c.logCommission.toFixed(2), en.thirteenthMonth, (en.incentiveLeaveDays||0), c.incentiveLeavePay.toFixed(2), allowance, en.adjustment, c.totalEarnings.toFixed(2),
-      c.sss.toFixed(2), c.philhealth.toFixed(2), c.pagibig.toFixed(2), c.lateDeduction.toFixed(2), c.loanDeduction.toFixed(2),
+      c.sss.toFixed(2), c.philhealth.toFixed(2), c.pagibig.toFixed(2), c.lateDeduction.toFixed(2), c.undertimeDeduction.toFixed(2), c.loanDeduction.toFixed(2),
       c.cashAdvanceDeduction.toFixed(2), c.otherDeduction.toFixed(2), c.totalDeductions.toFixed(2), c.takeHome.toFixed(2),
       emp.paymentMethod, (emp.paymentMethod==='bank' ? (emp.bankName||'') : ''), (emp.gcashNo||emp.bankAcct||'')];
     lines.push(row.map(v => `"${String(v).replace(/"/g,'""')}"`).join(','));
@@ -2571,8 +2651,8 @@ function buildPayslipDailyRows(en){
   const schedToMin = timeToMinutes(en.schedTo);
   return en.timesheet.filter(day => day.timeIn || day.timeOut).map(day=>{
     const daySched = resolveDaySchedule(day, schedFromMin, schedToMin);
-    const {hoursWorked, lateMinutes, otMinutes, isRestDay} = computeDayHours(day, daySched.fromMin, daySched.toMin, daySched.isOverride);
-    return { date: day.date, hoursWorked, lateMinutes, otHours: otApproved ? (otMinutes||0)/60 : 0, isRestDay };
+    const {hoursWorked, lateMinutes, otMinutes, undertimeMinutes, isRestDay} = computeDayHours(day, daySched.fromMin, daySched.toMin, daySched.isOverride);
+    return { date: day.date, hoursWorked, lateMinutes, undertimeMinutes, otHours: otApproved ? (otMinutes||0)/60 : 0, isRestDay };
   });
 }
 function payslipHtml(emp, en, run){
@@ -2606,12 +2686,13 @@ function payslipHtml(emp, en, run){
     ${dtrRows.length ? `<div class="payslip-section">
       <div class="payslip-section-title dtr">🗓 Daily Time Record</div>
       <table class="payslip-dtr-table" style="width:100%;">
-      <thead><tr><th>Date</th><th class="num">Hrs Worked</th><th class="num">Late (min)</th><th class="num">OT (hrs)</th></tr></thead>
+      <thead><tr><th>Date</th><th class="num">Hrs Worked</th><th class="num">Late (min)</th><th class="num">Undertime (min)</th><th class="num">OT (hrs)</th></tr></thead>
       <tbody>
       ${dtrRows.map(r=>`<tr>
         <td>${fmtDate(r.date)}${r.isRestDay ? ' <span class="dtr-tag">Rest Day</span>' : ''}</td>
         <td class="num">${r.hoursWorked.toFixed(2)}</td>
         <td class="num">${r.lateMinutes}</td>
+        <td class="num">${r.undertimeMinutes}</td>
         <td class="num">${r.otHours.toFixed(2)}</td>
       </tr>`).join('')}
       </tbody>
@@ -2619,6 +2700,7 @@ function payslipHtml(emp, en, run){
         <td>Total</td>
         <td class="num">${dtrRows.reduce((a,r)=>a+r.hoursWorked,0).toFixed(2)}</td>
         <td class="num">${dtrRows.reduce((a,r)=>a+r.lateMinutes,0)}</td>
+        <td class="num">${dtrRows.reduce((a,r)=>a+r.undertimeMinutes,0)}</td>
         <td class="num">${dtrRows.reduce((a,r)=>a+r.otHours,0).toFixed(2)}</td>
       </tr></tfoot>
       </table>
@@ -2648,6 +2730,7 @@ function payslipHtml(emp, en, run){
       <tr><td>Loan</td><td class="num">${peso(c.loanDeduction)}</td></tr>
       <tr><td>Cash Advance / Other Deductions</td><td class="num">${peso(c.cashAdvanceDeduction + c.otherDeduction)}</td></tr>
       <tr><td>Late</td><td class="num">${peso(c.lateDeduction)}</td></tr>
+      <tr><td>Undertime</td><td class="num">${peso(c.undertimeDeduction)}</td></tr>
       <tr class="totalrow"><td>Total Deductions</td><td class="num">${peso(c.totalDeductions)}</td></tr>
       </table>
     </div>
@@ -3247,7 +3330,7 @@ function renderLateTable(){
     r.entries.forEach(en=>{ totals[en.employeeId] = (totals[en.employeeId]||0) + num(en.lateMinutes); });
   });
   const rows = Object.entries(totals).filter(([,m])=>m>0).sort((a,b)=>b[1]-a[1]);
-  wrap.innerHTML = `<table><thead><tr><th>#</th><th>Employee</th><th class="num">Total Late Minutes</th></tr></thead><tbody>
+  wrap.innerHTML = `<table class="sortable"><thead><tr><th>#</th><th>Employee</th><th class="num">Total Late Minutes</th></tr></thead><tbody>
   ${rows.map(([id,m],i)=>{ const emp=empById(id); return `<tr><td>${i+1}</td><td>${esc(emp?emp.name:'(deleted)')}</td><td class="num">${m.toFixed(0)}</td></tr>`; }).join('')}
   </tbody></table>${rows.length===0?'<div class="empty-state">No late records in this range.</div>':''}`;
 }
@@ -3305,7 +3388,7 @@ function renderYtdTable(){
     return {...r, payroll, earnings};
   }).sort((a,b)=>b.takeHome-a.takeHome);
   const grand = rows.reduce((a,r)=>({earnings:a.earnings+r.earnings, payroll:a.payroll+r.payroll, deductions:a.deductions+r.deductions, takeHome:a.takeHome+r.takeHome, licCommission:a.licCommission+r.licCommission, fivejsCommission:a.fivejsCommission+r.fivejsCommission, productionCommission:a.productionCommission+r.productionCommission}), {earnings:0,payroll:0,deductions:0,takeHome:0,licCommission:0,fivejsCommission:0,productionCommission:0});
-  wrap.innerHTML = `<table><thead><tr><th>Employee</th><th class="num">YTD Payroll</th><th class="num">LIC Commission</th><th class="num">Production Commission</th><th class="num">5JS Commission</th><th class="num">Total Income</th><th class="num">Total Deductions</th><th class="num">Total Take-Home</th></tr></thead><tbody>
+  wrap.innerHTML = `<table class="sortable"><thead><tr><th>Employee</th><th class="num">YTD Payroll</th><th class="num">LIC Commission</th><th class="num">Production Commission</th><th class="num">5JS Commission</th><th class="num">Total Income</th><th class="num">Total Deductions</th><th class="num">Total Take-Home</th></tr></thead><tbody>
   ${rows.map(r=>`<tr><td>${esc(r.name)}</td><td class="num">${peso(r.payroll)}</td><td class="num">${peso(r.licCommission)}</td><td class="num">${peso(r.productionCommission)}</td><td class="num">${peso(r.fivejsCommission)}</td><td class="num" style="font-weight:700;">${peso(r.earnings)}</td><td class="num">${peso(r.deductions)}</td><td class="num">${peso(r.takeHome)}</td></tr>`).join('')}
   </tbody><tfoot><tr style="font-weight:700;background:#fafbfc;"><td>GRAND TOTAL</td><td class="num">${peso(grand.payroll)}</td><td class="num">${peso(grand.licCommission)}</td><td class="num">${peso(grand.productionCommission)}</td><td class="num">${peso(grand.fivejsCommission)}</td><td class="num">${peso(grand.earnings)}</td><td class="num">${peso(grand.deductions)}</td><td class="num">${peso(grand.takeHome)}</td></tr></tfoot></table>
   ${rows.length===0?'<div class="empty-state">No payroll or commission data for this year yet.</div>':''}`;
@@ -3417,7 +3500,7 @@ function renderAnnualTable(){
   const sum = (k) => rows.reduce((a,r)=>a+r[k],0);
   wrap.innerHTML = `
   ${isHistorical ? `<div class="helpbox">${year} is shown exactly as recorded in the company's payroll records for that year (before this system tracked every pay period in detail) — commission/incentive-leave/adjustment breakdowns weren't part of that historical record, so those columns show ₱0/blank here. There's no month-by-month breakdown behind this total, so the month filter is unavailable for this year.</div>` : ''}
-  <table><thead><tr>
+  <table class="sortable"><thead><tr>
     <th>Employee</th><th class="num">Basic Salary</th><th class="num">Rest Day Pay</th><th class="num">OT Pay</th>
     <th class="num">Holiday Pay</th><th class="num">5JS Commission</th><th class="num">LIC Commission</th>
     <th class="num">Production Commission</th><th class="num">Other Commission</th><th class="num">13th Month</th>
@@ -3481,7 +3564,7 @@ function renderRunSummaryTable(){
       <td class="num" style="${num(en.adjustment)!==0?'font-weight:600;':''}">${num(en.adjustment)!==0 ? peso(en.adjustment) : '—'}</td>
       <td style="white-space:normal;min-width:160px;color:${en.adjustmentNote?'inherit':'#999'};">${esc(en.adjustmentNote || (num(en.adjustment)!==0 ? '(no reason noted)' : ''))}</td>
       <td class="num">${peso(c.takeHome)}</td></tr>`; }).join('');
-  wrap.innerHTML = `<table><thead><tr><th>Employee</th><th class="num">Earnings</th><th class="num">Deductions</th><th class="num">Adjustment</th><th>Reason</th><th class="num">Take-Home</th></tr></thead>
+  wrap.innerHTML = `<table class="sortable"><thead><tr><th>Employee</th><th class="num">Earnings</th><th class="num">Deductions</th><th class="num">Adjustment</th><th>Reason</th><th class="num">Take-Home</th></tr></thead>
   <tbody>${rows}</tbody><tfoot><tr style="font-weight:700;background:#fafbfc;"><td>TOTAL</td><td class="num">${peso(e)}</td><td class="num">${peso(d)}</td><td class="num">${peso(adjTotal)}</td><td></td><td class="num">${peso(t)}</td></tr></tfoot></table>`;
 }
 const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
@@ -3514,13 +3597,13 @@ function renderDeductionsTable(){
   const monthSel = document.getElementById('ded_month').value;
   const month = monthSel === 'all' ? null : Number(monthSel);
   const empSel = document.getElementById('ded_emp') ? document.getElementById('ded_emp').value : 'all';
-  const empty = () => ({basic:0, sss:0, philhealth:0, pagibig:0, loan:0, cashAdvance:0, other:0, late:0});
-  const rowTotal = r => r.sss+r.philhealth+r.pagibig+r.loan+r.cashAdvance+r.other+r.late;
+  const empty = () => ({basic:0, sss:0, philhealth:0, pagibig:0, loan:0, cashAdvance:0, other:0, late:0, undertime:0});
+  const rowTotal = r => r.sss+r.philhealth+r.pagibig+r.loan+r.cashAdvance+r.other+r.late+r.undertime;
   // Basic Salary here is the ACTUAL amount earned (Regular Hrs. × Hourly Rate, per calcEntry —
   // same figure SSS is auto-calculated from), not a fixed monthly estimate. A month/period with no
   // payroll run recorded correctly shows ₱0, not a number implying pay that never actually happened.
   const addInto = (t, c) => { t.basic += c.basicSalary; t.sss += c.sss; t.philhealth += c.philhealth; t.pagibig += c.pagibig;
-    t.loan += c.loanDeduction; t.cashAdvance += c.cashAdvanceDeduction; t.other += c.otherDeduction; t.late += c.lateDeduction; };
+    t.loan += c.loanDeduction; t.cashAdvance += c.cashAdvanceDeduction; t.other += c.otherDeduction; t.late += c.lateDeduction; t.undertime += c.undertimeDeduction; };
 
   if(empSel !== 'all'){
     // Single employee: show a month-by-month breakdown for the selected year.
@@ -3537,9 +3620,9 @@ function renderDeductionsTable(){
     const grand = byMonth.reduce((a,m)=>{ Object.keys(a).forEach(k=>a[k]+=m[k]); return a; }, empty());
     wrap.innerHTML = `
     <div class="helpbox">${esc(emp?emp.name:'(deleted)')} — ${year} monthly deduction breakdown</div>
-    <table><thead><tr><th>Month</th><th class="num">Basic Salary</th><th class="num">SSS</th><th class="num">PhilHealth</th><th class="num">Pag-IBIG</th><th class="num">Loan</th><th class="num">Cash Adv.</th><th class="num">Other</th><th class="num">Late Ded.</th><th class="num">Total</th></tr></thead><tbody>
-    ${MONTH_NAMES.map((mn,i)=>{ const m = byMonth[i]; return `<tr><td>${mn}</td><td class="num">${peso(m.basic)}</td><td class="num">${peso(m.sss)}</td><td class="num">${peso(m.philhealth)}</td><td class="num">${peso(m.pagibig)}</td><td class="num">${peso(m.loan)}</td><td class="num">${peso(m.cashAdvance)}</td><td class="num">${peso(m.other)}</td><td class="num">${peso(m.late)}</td><td class="num" style="font-weight:700;">${peso(rowTotal(m))}</td></tr>`; }).join('')}
-    </tbody><tfoot><tr style="font-weight:700;background:#fafbfc;"><td>YEAR TOTAL</td><td class="num">${peso(grand.basic)}</td><td class="num">${peso(grand.sss)}</td><td class="num">${peso(grand.philhealth)}</td><td class="num">${peso(grand.pagibig)}</td><td class="num">${peso(grand.loan)}</td><td class="num">${peso(grand.cashAdvance)}</td><td class="num">${peso(grand.other)}</td><td class="num">${peso(grand.late)}</td><td class="num">${peso(rowTotal(grand))}</td></tr></tfoot></table>`;
+    <table class="sortable"><thead><tr><th>Month</th><th class="num">Basic Salary</th><th class="num">SSS</th><th class="num">PhilHealth</th><th class="num">Pag-IBIG</th><th class="num">Loan</th><th class="num">Cash Adv.</th><th class="num">Other</th><th class="num">Late Ded.</th><th class="num">Undertime Ded.</th><th class="num">Total</th></tr></thead><tbody>
+    ${MONTH_NAMES.map((mn,i)=>{ const m = byMonth[i]; return `<tr><td data-sort="${i}">${mn}</td><td class="num">${peso(m.basic)}</td><td class="num">${peso(m.sss)}</td><td class="num">${peso(m.philhealth)}</td><td class="num">${peso(m.pagibig)}</td><td class="num">${peso(m.loan)}</td><td class="num">${peso(m.cashAdvance)}</td><td class="num">${peso(m.other)}</td><td class="num">${peso(m.late)}</td><td class="num">${peso(m.undertime)}</td><td class="num" style="font-weight:700;">${peso(rowTotal(m))}</td></tr>`; }).join('')}
+    </tbody><tfoot><tr style="font-weight:700;background:#fafbfc;"><td>YEAR TOTAL</td><td class="num">${peso(grand.basic)}</td><td class="num">${peso(grand.sss)}</td><td class="num">${peso(grand.philhealth)}</td><td class="num">${peso(grand.pagibig)}</td><td class="num">${peso(grand.loan)}</td><td class="num">${peso(grand.cashAdvance)}</td><td class="num">${peso(grand.other)}</td><td class="num">${peso(grand.late)}</td><td class="num">${peso(grand.undertime)}</td><td class="num">${peso(rowTotal(grand))}</td></tr></tfoot></table>`;
     return;
   }
 
@@ -3555,7 +3638,7 @@ function renderDeductionsTable(){
     r.entries.forEach(en=>{
       const emp = empById(en.employeeId); if(!emp) return;
       const c = calcEntry(emp, en, r);
-      if(!c.sss && !c.philhealth && !c.pagibig && !c.loanDeduction && !c.cashAdvanceDeduction && !c.otherDeduction && !c.lateDeduction) return;
+      if(!c.sss && !c.philhealth && !c.pagibig && !c.loanDeduction && !c.cashAdvanceDeduction && !c.otherDeduction && !c.lateDeduction && !c.undertimeDeduction) return;
       addInto(ensure(emp), c);
     });
   });
@@ -3564,9 +3647,9 @@ function renderDeductionsTable(){
   const label = month===null ? `${year} (full year)` : `${MONTH_NAMES[month-1]} ${year}`;
   wrap.innerHTML = `
   <div class="helpbox">${label} — ${rows.length} employee${rows.length===1?'':'s'} with deductions</div>
-  <table><thead><tr><th>Employee</th><th class="num">Basic Salary</th><th class="num">SSS</th><th class="num">PhilHealth</th><th class="num">Pag-IBIG</th><th class="num">Loan</th><th class="num">Cash Adv.</th><th class="num">Other</th><th class="num">Late Ded.</th><th class="num">Total</th></tr></thead><tbody>
-  ${rows.map(r=>`<tr><td>${esc(r.name)}</td><td class="num">${peso(r.basic)}</td><td class="num">${peso(r.sss)}</td><td class="num">${peso(r.philhealth)}</td><td class="num">${peso(r.pagibig)}</td><td class="num">${peso(r.loan)}</td><td class="num">${peso(r.cashAdvance)}</td><td class="num">${peso(r.other)}</td><td class="num">${peso(r.late)}</td><td class="num" style="font-weight:700;">${peso(rowTotal(r))}</td></tr>`).join('')}
-  </tbody><tfoot><tr style="font-weight:700;background:#fafbfc;"><td>GRAND TOTAL</td><td class="num">${peso(grand.basic)}</td><td class="num">${peso(grand.sss)}</td><td class="num">${peso(grand.philhealth)}</td><td class="num">${peso(grand.pagibig)}</td><td class="num">${peso(grand.loan)}</td><td class="num">${peso(grand.cashAdvance)}</td><td class="num">${peso(grand.other)}</td><td class="num">${peso(grand.late)}</td><td class="num">${peso(rowTotal(grand))}</td></tr></tfoot></table>
+  <table class="sortable"><thead><tr><th>Employee</th><th class="num">Basic Salary</th><th class="num">SSS</th><th class="num">PhilHealth</th><th class="num">Pag-IBIG</th><th class="num">Loan</th><th class="num">Cash Adv.</th><th class="num">Other</th><th class="num">Late Ded.</th><th class="num">Undertime Ded.</th><th class="num">Total</th></tr></thead><tbody>
+  ${rows.map(r=>`<tr><td>${esc(r.name)}</td><td class="num">${peso(r.basic)}</td><td class="num">${peso(r.sss)}</td><td class="num">${peso(r.philhealth)}</td><td class="num">${peso(r.pagibig)}</td><td class="num">${peso(r.loan)}</td><td class="num">${peso(r.cashAdvance)}</td><td class="num">${peso(r.other)}</td><td class="num">${peso(r.late)}</td><td class="num">${peso(r.undertime)}</td><td class="num" style="font-weight:700;">${peso(rowTotal(r))}</td></tr>`).join('')}
+  </tbody><tfoot><tr style="font-weight:700;background:#fafbfc;"><td>GRAND TOTAL</td><td class="num">${peso(grand.basic)}</td><td class="num">${peso(grand.sss)}</td><td class="num">${peso(grand.philhealth)}</td><td class="num">${peso(grand.pagibig)}</td><td class="num">${peso(grand.loan)}</td><td class="num">${peso(grand.cashAdvance)}</td><td class="num">${peso(grand.other)}</td><td class="num">${peso(grand.late)}</td><td class="num">${peso(grand.undertime)}</td><td class="num">${peso(rowTotal(grand))}</td></tr></tfoot></table>
   ${rows.length===0?'<div class="empty-state">No deductions recorded for this period.</div>':''}`;
 }
 function renderTimesheetReport(root){
@@ -3600,25 +3683,26 @@ function renderTimesheetReportTable(){
     en.timesheet.forEach(day=>{
       if(day.date < from || day.date > to) return;
       const daySched = resolveDaySchedule(day, schedFromMin, schedToMin);
-      const { hoursWorked, lateMinutes, otMinutes, isRestDay } = computeDayHours(day, daySched.fromMin, daySched.toMin, daySched.isOverride);
-      days.push({ ...day, hoursWorked, lateMinutes, otHours: (otMinutes||0)/60, isRestDay, periodStart:r.periodStart, periodEnd:r.periodEnd });
+      const { hoursWorked, lateMinutes, otMinutes, undertimeMinutes, isRestDay } = computeDayHours(day, daySched.fromMin, daySched.toMin, daySched.isOverride);
+      days.push({ ...day, hoursWorked, lateMinutes, undertimeMinutes, otHours: (otMinutes||0)/60, isRestDay, periodStart:r.periodStart, periodEnd:r.periodEnd });
     });
   });
-  let totalHours=0, totalLate=0, totalOt=0, totalRestDay=0, daysWorked=0;
+  let totalHours=0, totalLate=0, totalOt=0, totalRestDay=0, totalUndertime=0, daysWorked=0;
   const rows = days.map(day=>{
-    if(day.isRestDay){ totalRestDay += day.hoursWorked; } else { totalHours += day.hoursWorked; totalLate += day.lateMinutes; totalOt += num(day.otHours); }
+    if(day.isRestDay){ totalRestDay += day.hoursWorked; } else { totalHours += day.hoursWorked; totalLate += day.lateMinutes; totalOt += num(day.otHours); totalUndertime += day.undertimeMinutes; }
     if(day.hoursWorked>0) daysWorked++;
     const dt = new Date(day.date+'T00:00:00');
     const wk = dt.toLocaleDateString('en-PH',{weekday:'short'});
-    return `<tr${day.isRestDay ? ' style="background:#fff8e6;"' : ''}><td>${fmtDate(day.date)}<br><span class="muted" style="font-size:10.5px;">${wk}${day.isRestDay ? ' · Rest Day' : ''}</span></td>
+    return `<tr${day.isRestDay ? ' style="background:#fff8e6;"' : ''}><td data-sort="${day.date}">${fmtDate(day.date)}<br><span class="muted" style="font-size:10.5px;">${wk}${day.isRestDay ? ' · Rest Day' : ''}</span></td>
       <td>${esc(day.timeIn)}</td><td>${esc(day.lunchOut)}</td><td>${esc(day.lunchIn)}</td><td>${esc(day.timeOut)}</td>
       <td class="num">${day.isRestDay ? '—' : day.hoursWorked.toFixed(2)}</td><td class="num">${day.isRestDay ? '—' : day.lateMinutes.toFixed(0)}</td>
+      <td class="num">${day.isRestDay ? '—' : day.undertimeMinutes.toFixed(0)}</td>
       <td class="num">${day.isRestDay ? '—' : num(day.otHours).toFixed(2)}</td>
       <td class="num">${day.isRestDay ? day.hoursWorked.toFixed(2) : '—'}</td><td>${esc(day.remarks)}</td></tr>`;
   }).join('');
   wrap.innerHTML = `
-  <div class="helpbox">${esc(emp.name)} — ${daysWorked} day${daysWorked===1?'':'s'} worked, ${totalHours.toFixed(2)} regular hours, ${totalLate.toFixed(0)} late minutes, ${totalOt.toFixed(2)} OT hours, ${totalRestDay.toFixed(2)} rest day hours (${fmtDate(from)} – ${fmtDate(to)})</div>
-  <table><thead><tr><th>Date</th><th>Time In</th><th>Lunch Out</th><th>Lunch In</th><th>Time Out</th><th class="num">Hrs Worked</th><th class="num">Late (min)</th><th class="num">OT Hrs</th><th class="num">Rest Day Hrs</th><th>Remarks</th></tr></thead>
+  <div class="helpbox">${esc(emp.name)} — ${daysWorked} day${daysWorked===1?'':'s'} worked, ${totalHours.toFixed(2)} regular hours, ${totalLate.toFixed(0)} late minutes, ${totalUndertime.toFixed(0)} undertime minutes, ${totalOt.toFixed(2)} OT hours, ${totalRestDay.toFixed(2)} rest day hours (${fmtDate(from)} – ${fmtDate(to)})</div>
+  <table class="sortable"><thead><tr><th>Date</th><th>Time In</th><th>Lunch Out</th><th>Lunch In</th><th>Time Out</th><th class="num">Hrs Worked</th><th class="num">Late (min)</th><th class="num">Undertime (min)</th><th class="num">OT Hrs</th><th class="num">Rest Day Hrs</th><th>Remarks</th></tr></thead>
   <tbody>${rows}</tbody></table>
   ${days.length===0?'<div class="empty-state">No time sheet records for this employee in this date range.</div>':''}`;
 }
