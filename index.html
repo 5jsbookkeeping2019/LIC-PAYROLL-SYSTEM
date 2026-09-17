@@ -653,6 +653,24 @@ function sortEntriesByName(entries){
 /* ---------- Calculation engine ---------- */
 function hourlyRate(emp){ return (num(emp.rateDay))/8; }
 
+// OJTs are on a flat allowance per day (e.g. ₱100/day, same figure whether they're on time or not),
+// not an hourly-derived Rate/Day like regular staff — so Late/Undertime deductions (which are computed
+// as pesos-per-minute of the HOURLY rate) don't make sense to apply to them at all. Real records use
+// either the Department field ("OJT") or, for a few older/inactive stub records, the Position field
+// instead — so both are checked here rather than assuming one is always filled in.
+function isOJT(emp){
+  if(!emp) return false;
+  const dept = String(emp.department||'').trim().toUpperCase();
+  const pos = String(emp.position||'').trim().toUpperCase();
+  return dept === 'OJT' || pos === 'OJT';
+}
+// Jamie asked for this "no Late/Undertime deduction for OJTs" rule to apply only going forward, not
+// retroactively to payroll runs already processed before this feature existed — so it's gated by this
+// run's Pay Date rather than applying unconditionally. Any run dated on/after this cutoff (Sept 1,
+// 2026, per Jamie) skips the deduction for OJTs; anything before it keeps computing/showing exactly
+// as it always did, so past OJT payslips/reports don't shift after the fact.
+const OJT_NO_LATE_UNDERTIME_FROM = '2026-09-01';
+
 function sssLookup(monthlyGross){
   const table = state.settings.sss;
   for(const row of table){
@@ -760,12 +778,16 @@ function calcEntry(emp, entry, run){
 
   const totalEarnings = basicSalary + restDayPay + otPay + holidayPay + commission + logCommission + thirteenthMonth + incentiveLeavePay + allowance + adjustment;
 
-  const lateDeduction = (hr/60) * lateMinutes;
+  // OJTs are flat-rate-per-day (see isOJT above) — Late/Undertime pesos deductions are skipped for
+  // them, but only for runs dated on/after OJT_NO_LATE_UNDERTIME_FROM, so older, already-processed
+  // OJT runs keep showing the deduction they were actually paid with, unchanged.
+  const ojtSkipLateUndertime = isOJT(emp) && String(run.payDate||'') >= OJT_NO_LATE_UNDERTIME_FROM;
+  const lateDeduction = ojtSkipLateUndertime ? 0 : (hr/60) * lateMinutes;
   // Undertime (leaving before Schedule To on a full-day attempt) is its own figure, computed and
   // deducted exactly the same way as Late — see computeDayHours. Kept separate from lateDeduction
   // so a day that's both late AND leaves early is charged for both, correctly, with no overlap.
   const undertimeMinutes = num(entry.undertimeMinutes);
-  const undertimeDeduction = (hr/60) * undertimeMinutes;
+  const undertimeDeduction = ojtSkipLateUndertime ? 0 : (hr/60) * undertimeMinutes;
   const applyStat = entry.applyStatutory !== false;
   const sss = applyStat ? num(entry.sss) : 0;
   const philhealth = applyStat ? num(entry.philhealth) : 0;
