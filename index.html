@@ -3139,6 +3139,25 @@ function renderLoans(root){
   document.getElementById('loanFilterTypeSel').addEventListener('change', function(){ loanFilterType = this.value; renderLoanTable(); });
   renderLoanTable();
 }
+// For each employee+type group of actual deduction rows (negative amount — the original loan/CA
+// GRANT row itself, which is positive, is never numbered), figures out "this is the Nth of M
+// deductions" by ordering that group by date. There's no stored link between a loan's installment
+// rows (no planId on the data), so this is inferred purely from employeeId+type+date each time the
+// table renders — accurate for the normal case of one loan/CA at a time per employee, same as how
+// the "Current balances still owed" figure above is already grouped by employee+type.
+function computeInstallmentPositions(list){
+  const groups = {};
+  list.filter(l => num(l.amount) < 0).forEach(l=>{
+    const key = l.employeeId + '|' + l.type;
+    (groups[key] = groups[key] || []).push(l);
+  });
+  const positions = {};
+  Object.values(groups).forEach(group=>{
+    group.sort((a,b)=> (a.date||'').localeCompare(b.date||'') || String(a.id).localeCompare(String(b.id)));
+    group.forEach((l,i)=>{ positions[l.id] = { index: i+1, total: group.length }; });
+  });
+  return positions;
+}
 function renderLoanTable(){
   const wrap = document.getElementById('loanTableWrap'); if(!wrap) return;
   const byType = computeBalancesByType();
@@ -3147,6 +3166,7 @@ function renderLoanTable(){
     .filter(l => loanFilterEmpId==='all' || l.employeeId===loanFilterEmpId)
     .filter(l => loanFilterType==='all' || l.type===loanFilterType)
     .sort((a,b)=> new Date(b.date)-new Date(a.date));
+  const installmentPositions = computeInstallmentPositions(list);
   const balanceLines = emps.map(e=>{
     const t = byType[e.id];
     if(!t) return '';
@@ -3162,8 +3182,9 @@ function renderLoanTable(){
   <table><thead><tr><th>Date</th><th>Employee</th><th>Type</th><th>Remarks</th><th class="num">Amount</th><th>Deducted?</th><th></th></tr></thead><tbody>
   ${list.map(l=>{
     const emp = empById(l.employeeId);
+    const pos = installmentPositions[l.id];
     return `<tr><td>${fmtDate(l.date)}</td><td>${esc(emp?emp.name:'(deleted)')}</td><td>${esc(l.type)}</td>
-    <td><input type="text" value="${esc(l.remarks)}" placeholder="e.g. emergency loan" style="width:100%;" onchange="updLoanRemarks('${l.id}',this.value)"></td>
+    <td><input type="text" value="${esc(l.remarks)}" placeholder="e.g. emergency loan" style="width:100%;" onchange="updLoanRemarks('${l.id}',this.value)">${pos ? `<div class="muted" style="font-size:11px;margin-top:2px;">Deduction ${pos.index} of ${pos.total}</div>` : ''}</td>
     <td class="num" style="color:${l.amount<0?'var(--brand-dark)':'inherit'}">${peso(l.amount)}</td>
     <td><label class="checkline"><input type="checkbox" ${l.deducted?'checked':''} onchange="toggleLoanDeducted('${l.id}',this.checked)"></label></td>
     <td><button class="btn btn-sm btn-danger" onclick="deleteLoan('${l.id}')">✕</button></td></tr>`;
