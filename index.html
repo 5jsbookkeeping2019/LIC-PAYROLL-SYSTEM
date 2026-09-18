@@ -1114,6 +1114,24 @@ function renderEmployees(root){
   document.getElementById('empShowInactive').addEventListener('change', e=>{ employeeShowInactive = e.target.checked; renderEmpTable(); });
   renderEmpTable();
 }
+// The Employee Portal signs employees in by matching NAME + BIRTHDAY only (see the get_employee_own_data
+// call in employeeLogin) — so if two employee records end up sharing both (most commonly: someone
+// resigned, their old record stayed on file, they got rehired as a new/reactivated record, and "Move
+// History to Another Record" moved their payroll/loans/commissions/leave over but the OLD record was
+// never deleted or had its Birthday cleared), the portal can't tell the two apart. Depending on which
+// row the lookup happens to match, the employee can end up looking at the wrong record — e.g. seeing
+// only old, pre-rehire payslips and none of their current ones. This is surfaced here so it gets
+// caught before (or right after) an employee runs into it.
+function findDuplicatePortalLogins(){
+  const groups = {};
+  state.employees.forEach(e=>{
+    const bday = String(e.birthday||'').trim();
+    if(!bday) return; // no birthday on file yet — can't collide on a portal login
+    const key = normalizeNameForMatch(e.name) + '|' + bday;
+    (groups[key] = groups[key] || []).push(e);
+  });
+  return Object.values(groups).filter(g=>g.length>1);
+}
 function renderEmpTable(){
   const wrap = document.getElementById('empTableWrap');
   if(!wrap) return;
@@ -1123,7 +1141,9 @@ function renderEmpTable(){
     const q = employeeSearch.toLowerCase();
     list = list.filter(e => (e.name||'').toLowerCase().includes(q) || (e.position||'').toLowerCase().includes(q) || (e.department||'').toLowerCase().includes(q));
   }
-  wrap.innerHTML = `<table><thead><tr>
+  const dupGroups = findDuplicatePortalLogins();
+  const dupWarning = dupGroups.length ? `<div class="helpbox" style="background:#fff4e5;border-color:#f0b429;margin-bottom:10px;">⚠ Same Name + Birthday on more than one record — the Employee Portal login can't tell these apart and may show the wrong payslips:<br>${dupGroups.map(g=>`<b>${esc(g[0].name)}</b> (${g.map(e=>e.active!==false?'Active':'Inactive').join(' & ')})`).join('<br>')}<br>Fix: make sure "Move History to Another Record" has moved everything off the old one, then either delete it or clear its Birthday so only the current record can log in.</div>` : '';
+  wrap.innerHTML = `${dupWarning}<table><thead><tr>
     <th>Name</th><th>Position</th><th>Department</th><th class="num">Rate/Day</th><th class="num">Allowance</th><th>Date Hired</th><th>Status</th><th></th>
   </tr></thead><tbody>
   ${list.map(e=>`<tr style="cursor:pointer;" onclick="editEmployee('${e.id}')">
