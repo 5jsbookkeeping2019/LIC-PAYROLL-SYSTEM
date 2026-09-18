@@ -2688,6 +2688,20 @@ function buildPayslipDailyRows(en){
     return { date: day.date, hoursWorked, lateMinutes, undertimeMinutes, otHours: otApproved ? (otMinutes||0)/60 : 0, isRestDay, remarks: String(day.remarks||'').trim() };
   });
 }
+// Finds which of this employee's Loan/Cash Advance installment rows (from Loans & Deductions) is the
+// one actually behind THIS payslip's Loan / Cash Advance deduction line, so the payslip can show the
+// same "Deduction X of Y" note as the Loans & Deductions table. Only rows "Sync Deductions" (or a
+// manual add tied to this exact run) actually linked to this run via deductedRunId count — a purely
+// hand-typed loanDeduction/cashAdvanceDeduction figure with no underlying record just shows no note,
+// rather than guessing.
+function loanInstallmentNoteForRun(emp, run, wantCashAdvance){
+  const empLoans = state.loans.filter(l => l.employeeId===emp.id);
+  const matches = empLoans.filter(l => l.deductedRunId===run.id && num(l.amount)<0 && (wantCashAdvance ? l.type==='Cash Advance' : l.type!=='Cash Advance'));
+  if(!matches.length) return '';
+  const positions = computeInstallmentPositions(empLoans);
+  const notes = matches.map(l => positions[l.id]).filter(Boolean).map(p=>`Deduction ${p.index} of ${p.total}`);
+  return notes.length ? notes.join(', ') : '';
+}
 function payslipHtml(emp, en, run){
   const c = calcEntry(emp, en, run);
   const allowance = c.allowance;
@@ -2695,6 +2709,8 @@ function payslipHtml(emp, en, run){
   const ytd = computeYTDForEmployee(emp.id, run.payDate || run.periodEnd);
   const leave = getLeaveInfoForEmployee(emp.id, new Date(run.periodEnd).getFullYear());
   const dtrRows = buildPayslipDailyRows(en);
+  const loanNote = loanInstallmentNoteForRun(emp, run, false);
+  const caNote = loanInstallmentNoteForRun(emp, run, true);
   return `<div class="payslip">
     <div class="payslip-topbar"></div>
     <div class="payslip-inner">
@@ -2762,8 +2778,8 @@ function payslipHtml(emp, en, run){
       <tr><td>SSS</td><td class="num">${peso(c.sss)}</td></tr>
       <tr><td>PhilHealth</td><td class="num">${peso(c.philhealth)}</td></tr>
       <tr><td>Pag-IBIG</td><td class="num">${peso(c.pagibig)}</td></tr>
-      <tr><td>Loan</td><td class="num">${peso(c.loanDeduction)}</td></tr>
-      <tr><td>Cash Advance / Other Deductions</td><td class="num">${peso(c.cashAdvanceDeduction + c.otherDeduction)}</td></tr>
+      <tr><td>Loan${loanNote ? `<div style="font-size:9px;color:#777;font-weight:400;">${esc(loanNote)}</div>` : ''}</td><td class="num">${peso(c.loanDeduction)}</td></tr>
+      <tr><td>Cash Advance / Other Deductions${caNote ? `<div style="font-size:9px;color:#777;font-weight:400;">Cash Advance: ${esc(caNote)}</div>` : ''}</td><td class="num">${peso(c.cashAdvanceDeduction + c.otherDeduction)}</td></tr>
       <tr><td>Late</td><td class="num">${peso(c.lateDeduction)}</td></tr>
       <tr><td>Undertime</td><td class="num">${peso(c.undertimeDeduction)}</td></tr>
       <tr class="totalrow"><td>Total Deductions</td><td class="num">${peso(c.totalDeductions)}</td></tr>
