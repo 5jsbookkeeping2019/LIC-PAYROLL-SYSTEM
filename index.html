@@ -599,8 +599,22 @@ function employeeViewPayslip(runId){
   const emp = state.employees[0];
   const run = state.runs.find(r=>r.id===runId);
   const en = run && run.entries.find(e=>e.employeeId===emp.id);
-  if(!run || !en) return;
   const holder = document.getElementById('employeePortalContent');
+  if(!run || !en){
+    // This pay period showed up in "My Payslips", but no payroll entry in it actually matches this
+    // signed-in account's employee ID — this used to fail completely silently (View/Download just did
+    // nothing, with no way for the employee or the admin to tell why). The most common real cause is
+    // two employee records sharing the same Name + Birthday (e.g. an old, pre-rehire record left over
+    // after "Move History to Another Record" was used) — the portal login matched the wrong one, so
+    // its ID doesn't line up with the entry this run actually stored. Surfacing this plainly gives the
+    // employee something concrete to report instead of just "hindi mabuksan."
+    if(holder){
+      holder.innerHTML = `
+      <button class="btn btn-sm no-print" style="margin-bottom:12px;" onclick="employeeShowList()">← Back to my payslips</button>
+      <div class="helpbox" style="background:#fdecea;border-color:#e57373;">This payslip couldn't be opened — this pay period has no payroll record matching this account. This usually means there are two employee records under the same name and birthday, and this account got matched to the wrong one. Please let your payroll admin know so they can check the Employees list for a duplicate record.</div>`;
+    }
+    return;
+  }
   holder.innerHTML = `
   <button class="btn btn-sm no-print" style="margin-bottom:12px;" onclick="employeeShowList()">← Back to my payslips</button>
   ${payslipHtml(emp, en, run)}
@@ -609,8 +623,11 @@ function employeeViewPayslip(runId){
   </div>`;
 }
 function employeeDownloadPayslip(runId){
+  const emp = state.employees[0];
+  const run = state.runs.find(r=>r.id===runId);
+  const en = run && run.entries.find(e=>e.employeeId===emp.id);
   employeeViewPayslip(runId);
-  setTimeout(()=>window.print(), 50);
+  if(run && en) setTimeout(()=>window.print(), 50); // don't pop the print dialog on the error message above
 }
 
 /* ---------- Utilities ---------- */
@@ -2715,6 +2732,13 @@ function buildPayslipDailyRows(en){
 // hand-typed loanDeduction/cashAdvanceDeduction figure with no underlying record just shows no note,
 // rather than guessing.
 function loanInstallmentNoteForRun(emp, run, wantCashAdvance){
+  // state.loans doesn't exist at all in the Employee Portal's own session state (employeeLogin only
+  // populates employees/runs/incentiveLeave/commissions/company/settings — loans were never part of
+  // what the portal RPC sends down, on purpose, since Loans & Deductions is an admin-only screen).
+  // Payslips render inside the portal too (My Payslips → View/Download), so this must degrade to "no
+  // note" there instead of throwing — an uncaught error here previously made the payslip fail to open
+  // at all, with nothing visible to explain why.
+  if(!Array.isArray(state.loans)) return '';
   const empLoans = state.loans.filter(l => l.employeeId===emp.id);
   const matches = empLoans.filter(l => l.deductedRunId===run.id && num(l.amount)<0 && (wantCashAdvance ? l.type==='Cash Advance' : l.type!=='Cash Advance'));
   if(!matches.length) return '';
