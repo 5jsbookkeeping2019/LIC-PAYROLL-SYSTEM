@@ -3174,6 +3174,7 @@ function computeBalancesByType(){
 let loanFilterEmpId = 'all';
 let loanFilterType = 'all';
 const LOAN_TYPES = ['Loan', 'Cash Advance', 'Pag-IBIG Loan', 'Repayment'];
+let loanViewTab = 'ledger';
 function renderLoans(root){
   const filterEmps = sortByName(activeEmployees());
   root.innerHTML = `
@@ -3193,11 +3194,72 @@ function renderLoans(root){
         <button class="btn btn-primary" onclick="addLoanModal()">+ Add Entry</button>
       </div>
     </div>
-    <div class="section-body"><div class="table-wrap" id="loanTableWrap"></div></div>
+    <div class="section-body" style="padding-top:0;">
+      <div class="subtabs no-print" style="margin-bottom:0;">
+        <button class="subtab ${loanViewTab==='ledger'?'active':''}" onclick="loanViewTab='ledger';renderLoanTable();">Ledger</button>
+        <button class="subtab ${loanViewTab==='summary'?'active':''}" onclick="loanViewTab='summary';renderLoanTable();">Loan Summary</button>
+      </div>
+      <div class="table-wrap" id="loanTableWrap"></div>
+    </div>
   </div>`;
   document.getElementById('loanFilterSel').addEventListener('change', function(){ loanFilterEmpId = this.value; renderLoanTable(); });
   document.getElementById('loanFilterTypeSel').addEventListener('change', function(){ loanFilterType = this.value; renderLoanTable(); });
   renderLoanTable();
+}
+// Groups an employee's Loan/CA/Pag-IBIG/Repayment rows into "loan episodes" for the Loan Summary
+// report: one loan/advance granted, followed by its scheduled installment deductions — who has what,
+// how much, the per-payday deduction, and when it started/ends. There's no stored link tying a loan's
+// installment rows together (no planId on the data), so an episode is inferred the exact same way the
+// app itself always creates one — a positive-amount "grant" row starts a new episode, and every
+// negative-amount row after it (same employee+type) belongs to that episode, until the next
+// positive-amount row starts a new one. A legacy/manual set of installment rows with no grant row on
+// file at all still gets one implied episode, using the sum of its deductions as a stand-in loan
+// amount — clearly marked "(est.)" rather than stated as fact.
+function computeLoanEpisodes(list){
+  const groups = {};
+  list.forEach(l=>{
+    const key = l.employeeId + '|' + l.type;
+    (groups[key] = groups[key] || []).push(l);
+  });
+  const episodes = [];
+  Object.values(groups).forEach(group=>{
+    group.sort((a,b)=> (a.date||'').localeCompare(b.date||'') || String(a.id).localeCompare(String(b.id)));
+    let current = null;
+    group.forEach(l=>{
+      const amt = num(l.amount);
+      if(amt > 0){
+        current = { employeeId:l.employeeId, type:l.type, grantAmount:amt, grantDate:l.date, installments:[], impliedAmount:false };
+        episodes.push(current);
+      } else if(amt < 0){
+        if(!current){
+          current = { employeeId:l.employeeId, type:l.type, grantAmount:0, grantDate:l.date, installments:[], impliedAmount:true };
+          episodes.push(current);
+        }
+        current.installments.push(l);
+      }
+    });
+  });
+  return episodes.filter(ep => ep.installments.length > 0 || ep.grantAmount > 0).map(ep=>{
+    const insts = ep.installments;
+    const amounts = insts.map(l=>Math.abs(num(l.amount)));
+    const perInstallment = amounts.length ? amounts[0] : 0;
+    const allSame = amounts.every(a=>Math.abs(a-perInstallment)<0.01);
+    const dates = insts.map(l=>l.date).filter(Boolean).sort();
+    const startDate = dates[0] || ep.grantDate;
+    const endDate = dates.length ? dates[dates.length-1] : '';
+    const deductedCount = insts.filter(l=>l.deducted===true).length;
+    const totalDeducted = insts.filter(l=>l.deducted===true).reduce((a,l)=>a+Math.abs(num(l.amount)),0);
+    const totalScheduled = amounts.reduce((a,b)=>a+b,0);
+    const amount = ep.impliedAmount ? totalScheduled : ep.grantAmount;
+    let status;
+    if(insts.length===0) status = 'No deductions scheduled';
+    else if(deductedCount>=insts.length) status = 'Fully Deducted';
+    else if(deductedCount>0) status = 'Ongoing';
+    else status = 'Not yet started';
+    return { employeeId: ep.employeeId, type: ep.type, amount, impliedAmount: ep.impliedAmount,
+      perInstallment, allSame, installmentCount: insts.length, startDate, endDate,
+      status, remainingBalance: Math.max(0, amount - totalDeducted) };
+  });
 }
 // For each employee+type group of actual deduction rows (negative amount — the original loan/CA
 // GRANT row itself, which is positive, is never numbered), figures out "this is the Nth of M
@@ -3226,6 +3288,7 @@ function renderLoanTable(){
     .filter(l => loanFilterEmpId==='all' || l.employeeId===loanFilterEmpId)
     .filter(l => loanFilterType==='all' || l.type===loanFilterType)
     .sort((a,b)=> new Date(b.date)-new Date(a.date));
+  if(loanViewTab === 'summary'){ renderLoanSummaryTable(wrap, list); return; }
   const installmentPositions = computeInstallmentPositions(list);
   const balanceLines = emps.map(e=>{
     const t = byType[e.id];
@@ -3250,6 +3313,32 @@ function renderLoanTable(){
     <td><button class="btn btn-sm btn-danger" onclick="deleteLoan('${l.id}')">✕</button></td></tr>`;
   }).join('')}
   </tbody></table>${list.length===0?'<div class="empty-state">No loan/CA entries yet.</div>':''}`;
+}
+// "Loan Summary" view: one row per loan/CA episode (see computeLoanEpisodes) — who has what, how
+// much, the per-payday deduction, and when it started/ends — instead of the full line-by-line ledger.
+function renderLoanSummaryTable(wrap, list){
+  const episodes = computeLoanEpisodes(list).sort((a,b)=>{
+    const nameA = (empById(a.employeeId)||{}).name || '';
+    const nameB = (empById(b.employeeId)||{}).name || '';
+    return nameA.localeCompare(nameB) || String(b.startDate||'').localeCompare(String(a.startDate||''));
+  });
+  wrap.innerHTML = `
+  <div class="helpbox">One row per loan/cash advance granted — Amount is what was granted (or, marked "(est.)", the sum of its scheduled deductions when no grant amount is on file). Status: "Fully Deducted" once every scheduled deduction for it has actually been applied in payroll.</div>
+  <table class="sortable"><thead><tr><th>Employee</th><th>Type</th><th class="num">Amount</th><th class="num">Deduction / Payday</th><th>Start</th><th>End</th><th>Status</th><th class="num">Remaining Balance</th></tr></thead><tbody>
+  ${episodes.map(ep=>{
+    const emp = empById(ep.employeeId);
+    return `<tr>
+      <td>${esc(emp?emp.name:'(deleted)')}</td>
+      <td>${esc(ep.type)}</td>
+      <td class="num">${peso(ep.amount)}${ep.impliedAmount ? ' <span class="muted" title="No original loan/grant amount on file for this one — shown instead as the sum of its scheduled deductions.">(est.)</span>' : ''}</td>
+      <td class="num">${ep.installmentCount ? (ep.allSame ? peso(ep.perInstallment) : 'varies') : '—'}</td>
+      <td data-sort="${esc(ep.startDate)}">${fmtDate(ep.startDate)}</td>
+      <td data-sort="${esc(ep.endDate)}">${ep.endDate ? fmtDate(ep.endDate) : '—'}</td>
+      <td>${ep.status}</td>
+      <td class="num">${peso(ep.remainingBalance)}</td>
+    </tr>`;
+  }).join('')}
+  </tbody></table>${episodes.length===0?'<div class="empty-state">No loans on file yet.</div>':''}`;
 }
 function addLoanModal(){
   const emps = sortByName(activeEmployees());
