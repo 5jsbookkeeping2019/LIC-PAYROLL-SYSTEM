@@ -3240,10 +3240,27 @@ function computeLoanEpisodes(list){
     });
   });
   return episodes.filter(ep => ep.installments.length > 0 || ep.grantAmount > 0).map(ep=>{
-    const insts = ep.installments;
+    const insts = ep.installments; // already in chronological order (see the group sort above)
     const amounts = insts.map(l=>Math.abs(num(l.amount)));
-    const perInstallment = amounts.length ? amounts[0] : 0;
-    const allSame = amounts.every(a=>Math.abs(a-perInstallment)<0.01);
+    // The "regular" per-payday figure is whichever amount has the most OTHER amounts within ₱1.00 of
+    // it — not an exact-centavo match, and not just whatever the first installment happens to be.
+    // Two things both produce small, harmless differences between installments that are really "the
+    // same" figure: (1) an installment plan's very last deduction is routinely smaller on purpose
+    // (computeInstallmentSchedule makes it absorb whatever's left of the total so the loan doesn't
+    // overshoot ₱0), and (2) a series entered by hand, month by month (no stored plan at all — see
+    // "impliedAmount" above), often carries a few centavos of rounding drift from one entry to the
+    // next even though it's meant to be one fixed monthly figure (e.g. ₱671.47 vs ₱671.46). A ₱1+
+    // difference is treated as a genuinely different amount; anything smaller is rounding noise.
+    const CLOSE_ENOUGH = 1.00;
+    let perInstallment = amounts[0] || 0, bestCount = 0;
+    amounts.forEach(a=>{
+      const closeCount = amounts.filter(b=>Math.abs(b-a) < CLOSE_ENOUGH).length;
+      if(closeCount > bestCount){ bestCount = closeCount; perInstallment = a; }
+    });
+    const oddOnes = amounts.filter(a=>Math.abs(a-perInstallment)>=CLOSE_ENOUGH);
+    const allSame = oddOnes.length === 0;
+    const lastAmount = amounts.length ? amounts[amounts.length-1] : 0;
+    const onlyLastDiffers = !allSame && oddOnes.length === 1 && Math.abs(lastAmount-perInstallment)>=CLOSE_ENOUGH;
     const dates = insts.map(l=>l.date).filter(Boolean).sort();
     const startDate = dates[0] || ep.grantDate;
     const endDate = dates.length ? dates[dates.length-1] : '';
@@ -3257,7 +3274,7 @@ function computeLoanEpisodes(list){
     else if(deductedCount>0) status = 'Ongoing';
     else status = 'Not yet started';
     return { employeeId: ep.employeeId, type: ep.type, amount, impliedAmount: ep.impliedAmount,
-      perInstallment, allSame, installmentCount: insts.length, startDate, endDate,
+      perInstallment, allSame, onlyLastDiffers, lastAmount, installmentCount: insts.length, startDate, endDate,
       status, remainingBalance: Math.max(0, amount - totalDeducted) };
   });
 }
@@ -3331,7 +3348,7 @@ function renderLoanSummaryTable(wrap, list){
       <td>${esc(emp?emp.name:'(deleted)')}</td>
       <td>${esc(ep.type)}</td>
       <td class="num">${peso(ep.amount)}${ep.impliedAmount ? ' <span class="muted" title="No original loan/grant amount on file for this one — shown instead as the sum of its scheduled deductions.">(est.)</span>' : ''}</td>
-      <td class="num">${ep.installmentCount ? (ep.allSame ? peso(ep.perInstallment) : 'varies') : '—'}</td>
+      <td class="num">${ep.installmentCount ? (ep.allSame ? peso(ep.perInstallment) : (ep.onlyLastDiffers ? `${peso(ep.perInstallment)} <span class="muted" title="The last scheduled deduction is smaller than the rest — it's just absorbing whatever's left of the balance, not a change in the regular deduction amount.">(last: ${peso(ep.lastAmount)})</span>` : 'varies')) : '—'}</td>
       <td data-sort="${esc(ep.startDate)}">${fmtDate(ep.startDate)}</td>
       <td data-sort="${esc(ep.endDate)}">${ep.endDate ? fmtDate(ep.endDate) : '—'}</td>
       <td>${ep.status}</td>
