@@ -750,7 +750,19 @@ function calcEntry(emp, entry, run){
   // differed from what's on the Employee record today (used to correct old runs so they keep
   // reflecting what was really paid, instead of silently recalculating at today's higher rate); it's
   // left unset for every ordinary/current entry, which falls back to the employee's live Rate/Day.
-  const rateDay = entry.rateDayOverride != null ? num(entry.rateDayOverride) : num(emp.rateDay);
+  //
+  // A SCHEDULED future increase (e.g. a DOLE wage order) works the other direction: emp.pendingRateDay
+  // + emp.pendingRateEffectiveDate let Jamie enter the new rate ahead of time without touching Rate
+  // per Day yet. It only kicks in for a run whose Pay Period START is on/after that effective date —
+  // deliberately the period's START, not its end or pay date, so a run already underway when the
+  // effective date lands mid-period keeps using the old rate for its whole cutoff (no day-by-day
+  // proration inside one entry) instead of jumping rates partway through; the next run, which starts
+  // cleanly on/after the effective date, gets the new rate automatically. rateDayOverride still wins
+  // over both when it's set, since it's a deliberate historical correction for that one entry.
+  const pendingActive = entry.rateDayOverride == null && emp.pendingRateDay != null && emp.pendingRateEffectiveDate
+    && run && run.periodStart && new Date(run.periodStart) >= new Date(emp.pendingRateEffectiveDate);
+  const rateDay = entry.rateDayOverride != null ? num(entry.rateDayOverride)
+    : pendingActive ? num(emp.pendingRateDay) : num(emp.rateDay);
   const hr = rateDay / 8;
   const hoursWorked = num(entry.hoursWorked);
   const lateMinutes = num(entry.lateMinutes);
@@ -1120,6 +1132,7 @@ function renderEmployees(root){
       <div class="flexrow no-print">
         <input class="search" id="empSearch" placeholder="Search name or position..." value="${esc(employeeSearch)}">
         <label class="checkline"><input type="checkbox" id="empShowInactive" ${employeeShowInactive?'checked':''}> Show inactive</label>
+        <button class="btn" onclick="wageIncreaseModal()" title="Schedule a rate increase for everyone currently at a specific Rate/Day (e.g. a DOLE wage order)">💰 Apply Wage Increase</button>
         <button class="btn btn-primary" onclick="editEmployee(null)">+ Add Employee</button>
       </div>
     </div>
@@ -1167,7 +1180,7 @@ function renderEmpTable(){
     <td>${esc(e.name)}</td>
     <td>${esc(e.position)}</td>
     <td class="muted">${esc(e.department)}</td>
-    <td class="num">${peso(e.rateDay)}</td>
+    <td class="num">${peso(e.rateDay)}${e.pendingRateDay!=null && e.pendingRateEffectiveDate ? `<div class="muted" style="font-size:11px;">→ ${peso(e.pendingRateDay)} starting ${fmtDate(e.pendingRateEffectiveDate)}</div>` : ''}</td>
     <td class="num">${peso(e.allowance)}</td>
     <td>${fmtDate(e.dateHired)}</td>
     <td>${e.active!==false ? '<span class="pill pill-ok">Active</span>' : '<span class="pill pill-off">Inactive</span>'}</td>
@@ -1185,6 +1198,8 @@ function editEmployee(id){
     <div class="field"><label>Position</label><input id="f_position" value="${esc(e.position||'')}"></div>
     <div class="field"><label>Department</label><input id="f_department" value="${esc(e.department||'')}"></div>
     <div class="field"><label>Rate per Day (₱)</label><input id="f_rateDay" type="number" step="0.01" value="${e.rateDay||0}"></div>
+    <div class="field"><label>New Rate per Day (₱) — optional</label><input id="f_pendingRateDay" type="number" step="0.01" value="${e.pendingRateDay!=null?e.pendingRateDay:''}" placeholder="e.g. a scheduled wage increase" title="Leave blank unless a rate change is scheduled. Once set with an Effective Date, every payroll run whose Pay Period START is on/after that date automatically uses this rate instead — runs that already started before it keep using the Rate per Day above, untouched."></div>
+    <div class="field"><label>Effective Date of New Rate</label><input id="f_pendingRateEffectiveDate" type="date" value="${e.pendingRateEffectiveDate||''}"></div>
     <div class="field"><label>Allowance per period (₱)</label><input id="f_allowance" type="number" step="0.01" value="${e.allowance||0}"></div>
     <div class="field"><label>Date Hired</label><input id="f_dateHired" type="date" value="${e.dateHired||''}"></div>
     <div class="field"><label>End Date (if separated)</label><input id="f_endDate" type="date" value="${e.endDate||''}"></div>
@@ -1298,7 +1313,10 @@ function saveEmployee(id, isNew){
   const get = k => document.getElementById(k).value;
   const rec = {
     id, name: get('f_name').trim(), empNo: get('f_empNo'), position: get('f_position'),
-    department: get('f_department'), rateDay: num(get('f_rateDay')), allowance: num(get('f_allowance')),
+    department: get('f_department'), rateDay: num(get('f_rateDay')),
+    pendingRateDay: get('f_pendingRateDay').trim()!=='' ? num(get('f_pendingRateDay')) : null,
+    pendingRateEffectiveDate: get('f_pendingRateEffectiveDate') || null,
+    allowance: num(get('f_allowance')),
     dateHired: get('f_dateHired'), endDate: get('f_endDate'), birthday: get('f_birthday'), tin: get('f_tin'), sssNo: get('f_sssNo'),
     philhealthNo: get('f_philhealthNo'), pagibigNo: get('f_pagibigNo'), paymentMethod: get('f_paymentMethod'),
     gcashNo: get('f_gcashNo'), bankAcct: get('f_paymentMethod')==='bank' ? get('f_gcashNo') : '',
@@ -1315,6 +1333,56 @@ function saveEmployee(id, isNew){
   if(isNew){ state.employees.push(rec); }
   else { const idx = state.employees.findIndex(x=>x.id===id); state.employees[idx] = {...state.employees[idx], ...rec}; }
   markDirty(); closeModal(); render(); toast("Employee saved");
+}
+// Bulk version of setting "New Rate per Day" + "Effective Date" (see editEmployee) across every
+// ACTIVE employee currently at an exact matching Rate/Day — for a DOLE wage order or similar across-
+// the-board increase, instead of opening each employee one at a time. It only ever SCHEDULES the
+// change (writes pendingRateDay/pendingRateEffectiveDate) — Rate per Day itself, and every existing
+// payroll run, is left completely untouched here; calcEntry is what actually switches a run over once
+// that run's Pay Period start reaches the effective date. Safe to re-run: it always computes off each
+// employee's CURRENT Rate per Day at the moment it's clicked, never off a previous pending value.
+function wageIncreaseModal(){
+  const body = `
+  <div class="helpbox">Schedules a rate increase for every ACTIVE employee currently at an exact Rate/Day — e.g. a DOLE wage order. This does NOT change Rate per Day itself yet, and does NOT touch any existing payroll run. Each matching employee's "New Rate per Day" + "Effective Date" (see Employee edit form) gets filled in — from then on, any run whose Pay Period START is on/after that date automatically uses the new rate; a run that already started before it keeps using the current rate for its whole cutoff.</div>
+  <div class="form-grid cols3" style="margin-top:10px;">
+    <div class="field"><label>Employees currently earning exactly (₱)</label><input id="wi_matchRate" type="number" step="0.01" value="695"></div>
+    <div class="field"><label>Increase (₱)</label><input id="wi_increase" type="number" step="0.01" value="60"></div>
+    <div class="field"><label>Effective Date</label><input id="wi_effdate" type="date" value="${todayISO()}"></div>
+  </div>
+  <div id="wi_preview" style="margin-top:12px;"></div>`;
+  const foot = `<button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" id="wi_apply_btn" onclick="saveWageIncrease()">Apply to Matching Employees</button>`;
+  openModal("Apply Wage Increase", body, foot, {wide:true});
+  ['wi_matchRate','wi_increase','wi_effdate'].forEach(id=>document.getElementById(id).addEventListener('input', refreshWageIncreasePreview));
+  refreshWageIncreasePreview();
+}
+function wageIncreaseMatches(){
+  const matchRate = num(document.getElementById('wi_matchRate').value);
+  return sortByName(activeEmployees()).filter(e => Math.abs(num(e.rateDay) - matchRate) < 0.01);
+}
+function refreshWageIncreasePreview(){
+  const holder = document.getElementById('wi_preview'); if(!holder) return;
+  const increase = num(document.getElementById('wi_increase').value);
+  const effDate = document.getElementById('wi_effdate').value;
+  const matches = wageIncreaseMatches();
+  document.getElementById('wi_apply_btn').disabled = matches.length===0 || !effDate;
+  if(!matches.length){ holder.innerHTML = `<div class="empty-state">No active employees currently at that exact Rate/Day.</div>`; return; }
+  holder.innerHTML = `<div class="table-wrap"><table><thead><tr><th>Employee</th><th class="num">Current Rate</th><th class="num">New Rate</th></tr></thead><tbody>
+  ${matches.map(e=>`<tr><td>${esc(e.name)}</td><td class="num">${peso(e.rateDay)}</td><td class="num">${peso(num(e.rateDay)+increase)}</td></tr>`).join('')}
+  </tbody></table></div>
+  <div class="helpbox" style="margin-top:8px;">${matches.length} employee${matches.length===1?'':'s'} will be scheduled to move to the new rate${effDate?` starting ${fmtDate(effDate)}`:''}. Any payroll run that's already started before that date is left completely alone — including one you may currently have open that straddles this date; add any partial-period difference for that one manually via its own Salary Adjustment field if needed.</div>`;
+}
+function saveWageIncrease(){
+  const increase = num(document.getElementById('wi_increase').value);
+  const effDate = document.getElementById('wi_effdate').value;
+  if(!effDate){ alert("Pick an effective date."); return; }
+  const matches = wageIncreaseMatches();
+  if(!matches.length){ alert("No matching employees to update."); return; }
+  matches.forEach(e=>{
+    e.pendingRateDay = Math.round((num(e.rateDay) + increase)*100)/100;
+    e.pendingRateEffectiveDate = effDate;
+  });
+  markDirty(); closeModal(); render();
+  toast(`Scheduled a ₱${increase} increase for ${matches.length} employee${matches.length===1?'':'s'}, effective ${fmtDate(effDate)}.`);
 }
 // Clears an employee's self-service PIN (used when they forget it) — they can then sign in again
 // with just Name + Birthday, and will be prompted to set a new PIN from inside the portal.
