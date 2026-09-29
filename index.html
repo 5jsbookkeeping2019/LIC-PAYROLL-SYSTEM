@@ -3310,7 +3310,7 @@ function renderLoanTable(){
     <td><input type="text" value="${esc(l.remarks)}" placeholder="e.g. emergency loan" style="width:100%;" onchange="updLoanRemarks('${l.id}',this.value)">${pos ? `<div class="muted" style="font-size:11px;margin-top:2px;">Deduction ${pos.index} of ${pos.total}</div>` : ''}</td>
     <td class="num" style="color:${l.amount<0?'var(--brand-dark)':'inherit'}">${peso(l.amount)}</td>
     <td><label class="checkline"><input type="checkbox" ${l.deducted?'checked':''} onchange="toggleLoanDeducted('${l.id}',this.checked)"></label></td>
-    <td><button class="btn btn-sm btn-danger" onclick="deleteLoan('${l.id}')">✕</button></td></tr>`;
+    <td><button class="btn btn-sm" onclick="addLoanModal('${l.id}')" title="Edit this entry — Employee, Type, Date, Amount, Remarks, Deducted?">✎ Edit</button> <button class="btn btn-sm btn-danger" onclick="deleteLoan('${l.id}')">✕</button></td></tr>`;
   }).join('')}
   </tbody></table>${list.length===0?'<div class="empty-state">No loan/CA entries yet.</div>':''}`;
 }
@@ -3340,21 +3340,40 @@ function renderLoanSummaryTable(wrap, list){
   }).join('')}
   </tbody></table>${episodes.length===0?'<div class="empty-state">No loans on file yet.</div>':''}`;
 }
-function addLoanModal(){
+// Handles both "+ Add Entry" (id omitted) and "✎ Edit" (id passed, pre-fills from the existing
+// record) — added so a wrong Employee/Type/Date/Amount on an entry (e.g. an accidental duplicate)
+// can be corrected in place instead of having to delete it and re-add it from scratch, which loses
+// which run it was ever synced/linked to (deductedRunId) for no reason when only, say, the amount
+// was mistyped.
+function addLoanModal(id){
+  const l = id ? state.loans.find(x=>x.id===id) : null;
   const emps = sortByName(activeEmployees());
+  const types = ['Loan', 'Cash Advance', 'Pag-IBIG Loan', 'Repayment'];
   const body = `<div class="form-grid cols3">
-    <div class="field"><label>Employee</label><select id="ln_emp">${emps.map(e=>`<option value="${e.id}">${esc(e.name)}</option>`).join('')}</select></div>
-    <div class="field"><label>Type</label><select id="ln_type"><option>Loan</option><option>Cash Advance</option><option>Pag-IBIG Loan</option><option>Repayment</option></select></div>
-    <div class="field"><label>Date</label><input id="ln_date" type="date" value="${todayISO()}"></div>
-    <div class="field" style="grid-column:1/-1;"><label>Remarks</label><input id="ln_remarks" placeholder="e.g. emergency loan"></div>
-    <div class="field"><label>Amount (₱) — use negative for repayment</label><input id="ln_amount" type="number" step="0.01" value="0"></div>
-  </div>`;
-  const foot = `<button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="saveLoan()">Save</button>`;
-  openModal("Add Loan / Cash Advance Entry", body, foot);
+    <div class="field"><label>Employee</label><select id="ln_emp">${emps.map(e=>`<option value="${e.id}" ${l && l.employeeId===e.id?'selected':''}>${esc(e.name)}</option>`).join('')}</select></div>
+    <div class="field"><label>Type</label><select id="ln_type">${types.map(t=>`<option ${l && l.type===t?'selected':''}>${t}</option>`).join('')}</select></div>
+    <div class="field"><label>Date</label><input id="ln_date" type="date" value="${l ? esc(l.date) : todayISO()}"></div>
+    <div class="field" style="grid-column:1/-1;"><label>Remarks</label><input id="ln_remarks" placeholder="e.g. emergency loan" value="${l ? esc(l.remarks) : ''}"></div>
+    <div class="field"><label>Amount (₱) — use negative for repayment</label><input id="ln_amount" type="number" step="0.01" value="${l ? l.amount : 0}"></div>
+    ${l ? `<div class="field"><label>Deducted?</label><select id="ln_deducted"><option value="0" ${!l.deducted?'selected':''}>No</option><option value="1" ${l.deducted?'selected':''}>Yes</option></select></div>` : ''}
+  </div>
+  ${l && l.deductedRunId ? `<div class="helpbox" style="margin-top:8px;">This entry is linked to a payroll run (via Sync Deductions or a direct link). Changing its Amount here does NOT change what that run's payslip already shows — re-run Sync Deductions on that run afterward if the figures need to match.</div>` : ''}`;
+  const foot = `<button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="saveLoan('${id||''}')">${l ? 'Save Changes' : 'Save'}</button>`;
+  openModal(l ? "Edit Loan / Cash Advance Entry" : "Add Loan / Cash Advance Entry", body, foot);
 }
-function saveLoan(){
-  state.loans.push({ id: uid('ln'), employeeId: document.getElementById('ln_emp').value, type: document.getElementById('ln_type').value,
-    date: document.getElementById('ln_date').value, remarks: document.getElementById('ln_remarks').value, amount: num(document.getElementById('ln_amount').value), deducted:false });
+function saveLoan(id){
+  const rec = { employeeId: document.getElementById('ln_emp').value, type: document.getElementById('ln_type').value,
+    date: document.getElementById('ln_date').value, remarks: document.getElementById('ln_remarks').value, amount: num(document.getElementById('ln_amount').value) };
+  if(id){
+    const l = state.loans.find(x=>x.id===id);
+    if(l){
+      Object.assign(l, rec);
+      const dedSel = document.getElementById('ln_deducted');
+      if(dedSel) l.deducted = dedSel.value === '1';
+    }
+  } else {
+    state.loans.push({ id: uid('ln'), ...rec, deducted:false });
+  }
   markDirty(); closeModal(); renderLoanTable();
 }
 function toggleLoanDeducted(id, val){ const l = state.loans.find(x=>x.id===id); if(l){ l.deducted = val; markDirty(); renderLoanTable(); } }
