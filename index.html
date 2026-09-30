@@ -378,28 +378,38 @@ let currentUserRole = 'admin'; // 'admin' | 'hr'
 const HR_WRITE_PREFIXES = ['save','del','add','edit','toggle','apply','sync','migrate','transfer','reset','confirm','remove','mark','create','upd','auto','new','wageIncrease'];
 const HR_WRITE_EXCEPTIONS = ['openEntryEditModal','openTimesheetModal','openTimesheetPicker','runTransferHistory','setCommissionRun'];
 const HR_WRITE_ALLOW = ['saveData']; // matches a write-prefix but is actually read-only (downloads a backup file)
-function hrExtractFnName(attrVal){
-  const m = /^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\(/.exec(attrVal||'');
-  return m ? m[1] : null;
+function hrExtractFnNames(attrVal){
+  // Scans the WHOLE attribute for every functionName( occurrence, not just one anchored at the
+  // start — many buttons here use compound handlers like
+  // "event.stopPropagation();deleteRun('id')" or "if(confirm('...')) editEmployee('id')", and an
+  // anchored single-match scan misses the real call entirely (event.stopPropagation() has a dot
+  // before its paren, so it wouldn't match a "starts with identifier(" pattern, and the scan
+  // would wrongly conclude the whole attribute has no recognizable call at all).
+  const names = [];
+  const re = /([a-zA-Z_][a-zA-Z0-9_]*)\s*\(/g;
+  let m;
+  while((m = re.exec(attrVal||''))){ names.push(m[1]); }
+  return names;
 }
-function isHrWriteAction(fnName){
-  if(!fnName) return false;
-  if(HR_WRITE_ALLOW.includes(fnName)) return false;
-  if(HR_WRITE_EXCEPTIONS.includes(fnName)) return true;
-  return HR_WRITE_PREFIXES.some(p => fnName.indexOf(p) === 0);
+function isHrWriteAction(attrVal){
+  const names = hrExtractFnNames(attrVal);
+  if(!names.length) return false;
+  return names.some(fnName=>{
+    if(HR_WRITE_ALLOW.includes(fnName)) return false;
+    if(HR_WRITE_EXCEPTIONS.includes(fnName)) return true;
+    return HR_WRITE_PREFIXES.some(p => fnName.indexOf(p) === 0);
+  });
 }
 function applyReadOnlyMode(root){
   if(currentUserRole !== 'hr') return;
   root = root || document.body;
   root.querySelectorAll('[onclick]').forEach(el=>{
-    const fn = hrExtractFnName(el.getAttribute('onclick'));
-    if(!isHrWriteAction(fn)) return;
+    if(!isHrWriteAction(el.getAttribute('onclick'))) return;
     if(el.tagName==='BUTTON'){ el.style.display = 'none'; }
     else { el.onclick = null; }
   });
   root.querySelectorAll('[onchange]').forEach(el=>{
-    const fn = hrExtractFnName(el.getAttribute('onchange'));
-    if(!isHrWriteAction(fn)) return;
+    if(!isHrWriteAction(el.getAttribute('onchange'))) return;
     if(el.tagName==='INPUT'||el.tagName==='SELECT'||el.tagName==='TEXTAREA'){ el.disabled = true; }
   });
   // A few write controls wired via addEventListener (no onclick/onchange attribute), or whose
@@ -488,11 +498,18 @@ async function onAuthed(session){
     cloudLoaded = true;
   }
   const email = (session.user.email || '').trim().toLowerCase();
+  const wasRole = currentUserRole;
   currentUserRole = (state.settings.hrEmails||[]).includes(email) ? 'hr' : 'admin';
   document.getElementById('authEmailLabel').textContent = 'Signed in as ' + (session.user.email || '') + (currentUserRole==='hr' ? ' — View-Only' : '');
   if(currentUserRole === 'hr'){
     dirty = false; updateSaveBtn();
     startReadOnlyObserver();
+    // The very first render() above (inside loadStateFromCloud) ran before the role was known, so
+    // it would have rendered Settings in full if that was the current/bookmarked page. Re-render
+    // now that currentUserRole is set, so render()'s own HR/Settings redirect and the nav rebuild
+    // (which drops the Settings link for HR) actually take effect on first load, not just after
+    // the next navigation.
+    if(wasRole !== 'hr' || currentPage === 'settings') render();
   }
 }
 async function loadStateFromCloud(){
@@ -1058,9 +1075,15 @@ let runFilter = 'all'; // Payroll Run detail table row filter — see RUN_FILTER
 // "Open in new tab"), landing on that exact page instead of always starting over at the Dashboard.
 // Clicking it normally still just changes location.hash, which the 'hashchange' listener below
 // converts into the actual page switch — one single path handles both cases.
+// Settings is Administrator-only — an HR/view-only account never sees the nav link for it, can't
+// land on it via a typed/bookmarked #settings URL, and gets bounced to Reports if it somehow ends
+// up there (e.g. currentPage was already 'settings' in memory from before a role change).
+function pagesForRole(){
+  return currentUserRole === 'hr' ? PAGES.filter(p => p.id !== 'settings') : PAGES;
+}
 function buildNav(){
   const nav = document.getElementById('navlist');
-  nav.innerHTML = PAGES.map(p => `
+  nav.innerHTML = pagesForRole().map(p => `
     <li><a class="navbtn ${p.id===currentPage?'active':''}" href="#${p.id}">
       <span class="ic">${p.icon}</span><span>${p.label}</span>
     </a></li>`).join('');
@@ -1070,7 +1093,14 @@ function buildNav(){
 // on a nav link and for the browser's own back/forward buttons.
 function applyHashToCurrentPage(){
   const hash = (location.hash || '').replace('#','');
-  if(!hash || !PAGES.some(p=>p.id===hash) || hash===currentPage) return;
+  if(!hash || hash===currentPage) return;
+  if(!pagesForRole().some(p=>p.id===hash)){
+    // A real page id (e.g. a bookmarked #settings), just not one this role is allowed onto —
+    // snap the address bar back to where we actually are instead of leaving it pointing somewhere
+    // the content doesn't match.
+    if(PAGES.some(p=>p.id===hash)) location.hash = '#' + currentPage;
+    return;
+  }
   currentPage = hash;
   if(currentPage === 'payroll') payrollDetailMode = false;
   render();
@@ -1081,10 +1111,11 @@ window.addEventListener('hashchange', applyHashToCurrentPage);
 // opens straight to that page instead of always landing on the Dashboard first.
 function initPageFromHash(){
   const hash = (location.hash || '').replace('#','');
-  if(hash && PAGES.some(p=>p.id===hash)) currentPage = hash;
+  if(hash && pagesForRole().some(p=>p.id===hash)) currentPage = hash;
 }
 
 function render(){
+  if(currentUserRole === 'hr' && currentPage === 'settings'){ currentPage = 'reports'; location.hash = '#reports'; }
   document.getElementById('sbCompanyName').textContent = state.company.name || "Payroll";
   buildNav();
   const page = PAGES.find(p=>p.id===currentPage);
