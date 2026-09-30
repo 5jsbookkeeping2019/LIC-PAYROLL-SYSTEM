@@ -722,7 +722,7 @@ function surnameKeyForEmp(emp){
   if(emp.lastName && emp.lastName.trim()) return emp.lastName.trim();
   return getSurname(emp.name);
 }
-// "Lastname, Firstname Middlename" — the display format used across Reports and employee pickers
+// "Lastname, Firstname, Middlename" — the display format used across Reports and employee pickers
 // once an employee has been split into structured fields. Falls back to the plain stored Name for
 // anyone not yet migrated, so nothing breaks for records still awaiting review in the Migrate Names
 // tool.
@@ -731,7 +731,7 @@ function displayNameLFM(emp){
   if(emp.lastName && emp.lastName.trim()){
     const first = (emp.firstName||'').trim();
     const middle = (emp.middleName||'').trim();
-    return `${emp.lastName.trim()}, ${first}${middle ? ' '+middle : ''}`.trim();
+    return [emp.lastName.trim(), first, middle].filter(Boolean).join(', ');
   }
   return emp.name || '';
 }
@@ -2771,6 +2771,23 @@ function downloadText(text, filename, type){
   const a = document.createElement('a'); a.href = url; a.download = filename;
   document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
 }
+// Shared CSV export used by every Reports "⬇ Download Excel" button — a .csv opens straight into
+// Excel (double-click, or Excel's own Open dialog) without needing any extra library, and stays
+// correct even where this app has no internet access to fetch one from. A UTF-8 BOM is prepended so
+// Excel doesn't mangle the peso sign (₱) into garbled characters, which plain UTF-8 CSV is prone to
+// in Excel specifically (other spreadsheet apps don't need it, but tolerate it fine).
+function csvCell(v){ return `"${String(v==null?'':v).replace(/"/g,'""')}"`; }
+function exportRowsToCSV(filename, headers, rows){
+  const lines = [headers.map(csvCell).join(',')];
+  rows.forEach(row => lines.push(row.map(csvCell).join(',')));
+  downloadText('﻿' + lines.join('\r\n'), filename, 'text/csv;charset=utf-8');
+}
+// "🖨 Download PDF" buttons across Reports all just trigger the browser's native print dialog
+// (Save as PDF), the same convention already used for Payslips — the print stylesheet
+// (@media print, `.no-print`) already hides the sidebar/topbar and every filter control on these
+// pages, so nothing extra is needed per report; this exists only so every report's button reads the
+// same onclick.
+function printReport(){ window.print(); }
 
 /* ===================== PAYSLIPS ===================== */
 function renderPayslips(root){
@@ -3409,9 +3426,12 @@ function renderLoans(root){
       </div>
     </div>
     <div class="section-body" style="padding-top:0;">
-      <div class="subtabs no-print" style="margin-bottom:0;">
-        <button class="subtab ${loanViewTab==='ledger'?'active':''}" onclick="loanViewTab='ledger';renderLoanTable();">Ledger</button>
-        <button class="subtab ${loanViewTab==='summary'?'active':''}" onclick="loanViewTab='summary';renderLoanTable();">Loan Summary</button>
+      <div class="subtabs no-print" style="margin-bottom:0;display:flex;justify-content:space-between;align-items:center;">
+        <div>
+          <button class="subtab ${loanViewTab==='ledger'?'active':''}" onclick="loanViewTab='ledger';renderLoanTable();">Ledger</button>
+          <button class="subtab ${loanViewTab==='summary'?'active':''}" onclick="loanViewTab='summary';renderLoanTable();">Loan Summary</button>
+        </div>
+        ${loanViewTab==='summary' ? `<div class="flexrow" style="margin:0;"><button class="btn btn-sm" onclick="exportLoanSummaryCSV()">⬇ Download Excel</button><button class="btn btn-sm" onclick="printReport()">🖨 Download PDF</button></div>` : ''}
       </div>
       <div class="table-wrap" id="loanTableWrap"></div>
     </div>
@@ -3570,6 +3590,26 @@ function renderLoanSummaryTable(wrap, list){
     </tr>`;
   }).join('')}
   </tbody></table>${episodes.length===0?'<div class="empty-state">No loans on file yet.</div>':''}`;
+}
+// Re-applies the same Employee/Type filters renderLoanTable uses before handing off to
+// renderLoanSummaryTable, so the download always matches whatever's currently on screen.
+function exportLoanSummaryCSV(){
+  const list = [...state.loans]
+    .filter(l => loanFilterEmpId==='all' || l.employeeId===loanFilterEmpId)
+    .filter(l => loanFilterType==='all' || l.type===loanFilterType)
+    .sort((a,b)=> new Date(b.date)-new Date(a.date));
+  const episodes = computeLoanEpisodes(list).sort((a,b)=>{
+    const empA = empById(a.employeeId), empB = empById(b.employeeId);
+    const nameA = empA ? empA.name : '', nameB = empB ? empB.name : '';
+    return surnameKeyForEmp(empA).localeCompare(surnameKeyForEmp(empB)) || nameA.localeCompare(nameB) || String(b.startDate||'').localeCompare(String(a.startDate||''));
+  });
+  const rows = episodes.map(ep=>{
+    const emp = empById(ep.employeeId);
+    const deduction = ep.installmentCount ? (ep.allSame ? ep.perInstallment.toFixed(2) : (ep.onlyLastDiffers ? `${ep.perInstallment.toFixed(2)} (last: ${ep.lastAmount.toFixed(2)})` : 'varies')) : '';
+    return [emp?displayNameLFM(emp):'(deleted)', ep.type, ep.amount.toFixed(2) + (ep.impliedAmount?' (est.)':''), deduction,
+      fmtDate(ep.startDate), ep.endDate?fmtDate(ep.endDate):'', ep.status, ep.remainingBalance.toFixed(2)];
+  });
+  exportRowsToCSV(`Loan_Summary_${todayISO()}.csv`, ['Employee','Type','Amount','Deduction / Payday','Start','End','Status','Remaining Balance'], rows);
 }
 // Handles both "+ Add Entry" (id omitted) and "✎ Edit" (id passed, pre-fills from the existing
 // record) — added so a wrong Employee/Type/Date/Amount on an entry (e.g. an accidental duplicate)
@@ -3794,14 +3834,15 @@ function renderLateReport(root){
   const defaultTo = todayISO();
   root.innerHTML = `<div class="section"><div class="section-head">
     <div><h3>Late Rankings</h3><div class="desc">Total late minutes per employee across payroll runs in the selected date range.</div></div>
-    <div class="flexrow no-print"><input type="date" id="lr_from" value="${defaultFrom}"><span>to</span><input type="date" id="lr_to" value="${defaultTo}"><button class="btn" onclick="renderLateTable()">Apply</button></div>
+    <div class="flexrow no-print"><input type="date" id="lr_from" value="${defaultFrom}"><span>to</span><input type="date" id="lr_to" value="${defaultTo}"><button class="btn" onclick="renderLateTable()">Apply</button>
+      <button class="btn" onclick="exportLateRankingsCSV()">⬇ Download Excel</button>
+      <button class="btn" onclick="printReport()">🖨 Download PDF</button></div>
   </div><div class="section-body"><div id="lateWrap" class="table-wrap"></div></div></div>`;
   renderLateTable();
 }
-function renderLateTable(){
-  const wrap = document.getElementById('lateWrap'); if(!wrap) return;
-  const from = document.getElementById('lr_from') ? document.getElementById('lr_from').value : `${new Date().getFullYear()}-01-01`;
-  const to = document.getElementById('lr_to') ? document.getElementById('lr_to').value : todayISO();
+// Shared by renderLateTable (the on-screen table) and exportLateRankingsCSV (the download) so the
+// ranking logic — and its surname tiebreak — never has to be kept in sync by hand in two places.
+function computeLateRankings(from, to){
   const totals = {};
   state.runs.forEach(r=>{
     if(r.periodEnd < from || r.periodStart > to) return;
@@ -3809,25 +3850,38 @@ function renderLateTable(){
   });
   // Ranked worst-to-best by total late minutes (the whole point of this report); employees tied on
   // minutes are ordered by surname so the tie isn't arbitrary/insertion-order.
-  const rows = Object.entries(totals).filter(([,m])=>m>0).sort((a,b)=> b[1]-a[1] || surnameKeyForEmp(empById(a[0])).localeCompare(surnameKeyForEmp(empById(b[0]))));
+  return Object.entries(totals).filter(([,m])=>m>0).sort((a,b)=> b[1]-a[1] || surnameKeyForEmp(empById(a[0])).localeCompare(surnameKeyForEmp(empById(b[0]))));
+}
+function renderLateTable(){
+  const wrap = document.getElementById('lateWrap'); if(!wrap) return;
+  const from = document.getElementById('lr_from') ? document.getElementById('lr_from').value : `${new Date().getFullYear()}-01-01`;
+  const to = document.getElementById('lr_to') ? document.getElementById('lr_to').value : todayISO();
+  const rows = computeLateRankings(from, to);
   wrap.innerHTML = `<table class="sortable"><thead><tr><th>#</th><th>Employee</th><th class="num">Total Late Minutes</th></tr></thead><tbody>
   ${rows.map(([id,m],i)=>{ const emp=empById(id); return `<tr><td>${i+1}</td><td>${esc(emp?displayNameLFM(emp):'(deleted)')}</td><td class="num">${m.toFixed(0)}</td></tr>`; }).join('')}
   </tbody></table>${rows.length===0?'<div class="empty-state">No late records in this range.</div>':''}`;
+}
+function exportLateRankingsCSV(){
+  const from = document.getElementById('lr_from').value, to = document.getElementById('lr_to').value;
+  const rows = computeLateRankings(from, to);
+  exportRowsToCSV(`Late_Rankings_${from}_to_${to}.csv`, ['#','Employee','Total Late Minutes'],
+    rows.map(([id,m],i)=>{ const emp=empById(id); return [i+1, emp?displayNameLFM(emp):'(deleted)', m.toFixed(0)]; }));
 }
 function renderYtdReport(root){
   const years = Array.from(new Set(state.runs.map(r=>new Date(r.periodEnd).getFullYear()))).sort((a,b)=>b-a);
   const year = years[0] || new Date().getFullYear();
   root.innerHTML = `<div class="section"><div class="section-head">
     <div><h3>Year-to-Date Summary</h3><div class="desc">YTD Payroll is pure LIC salary — Total Income minus LIC, Production, and 5JS Commission. Total Income is Payroll + LIC + Production + 5JS Commission combined.</div></div>
-    <div class="flexrow no-print"><select id="ytd_year">${(years.length?years:[year]).map(y=>`<option value="${y}">${y}</option>`).join('')}</select></div>
+    <div class="flexrow no-print"><select id="ytd_year">${(years.length?years:[year]).map(y=>`<option value="${y}">${y}</option>`).join('')}</select>
+      <button class="btn" onclick="exportYtdCSV()">⬇ Download Excel</button>
+      <button class="btn" onclick="printReport()">🖨 Download PDF</button></div>
   </div><div class="section-body"><div id="ytdWrap" class="table-wrap"></div></div></div>`;
   const sel = document.getElementById('ytd_year');
   sel.addEventListener('change', renderYtdTable);
   renderYtdTable();
 }
-function renderYtdTable(){
-  const wrap = document.getElementById('ytdWrap'); if(!wrap) return;
-  const year = Number(document.getElementById('ytd_year').value);
+// Shared by renderYtdTable and exportYtdCSV.
+function computeYtdRows(year){
   const totals = {};
   const ensure = (emp) => {
     if(!totals[emp.id]) totals[emp.id] = {name:emp.name, lfm:displayNameLFM(emp), surnameKey:surnameKeyForEmp(emp), deductions:0, takeHome:0, embeddedCommission:0, licCommission:0, fivejsCommission:0, productionCommission:0};
@@ -3867,11 +3921,24 @@ function renderYtdTable(){
     const earnings = payroll + r.licCommission + r.fivejsCommission + r.productionCommission;
     return {...r, payroll, earnings};
   }).sort((a,b)=> a.surnameKey.localeCompare(b.surnameKey) || a.name.localeCompare(b.name));
+  return rows;
+}
+function renderYtdTable(){
+  const wrap = document.getElementById('ytdWrap'); if(!wrap) return;
+  const year = Number(document.getElementById('ytd_year').value);
+  const rows = computeYtdRows(year);
   const grand = rows.reduce((a,r)=>({earnings:a.earnings+r.earnings, payroll:a.payroll+r.payroll, deductions:a.deductions+r.deductions, takeHome:a.takeHome+r.takeHome, licCommission:a.licCommission+r.licCommission, fivejsCommission:a.fivejsCommission+r.fivejsCommission, productionCommission:a.productionCommission+r.productionCommission}), {earnings:0,payroll:0,deductions:0,takeHome:0,licCommission:0,fivejsCommission:0,productionCommission:0});
   wrap.innerHTML = `<table class="sortable"><thead><tr><th>Employee</th><th class="num">YTD Payroll</th><th class="num">LIC Commission</th><th class="num">Production Commission</th><th class="num">5JS Commission</th><th class="num">Total Income</th><th class="num">Total Deductions</th><th class="num">Total Take-Home</th></tr></thead><tbody>
   ${rows.map(r=>`<tr><td>${esc(r.lfm)}</td><td class="num">${peso(r.payroll)}</td><td class="num">${peso(r.licCommission)}</td><td class="num">${peso(r.productionCommission)}</td><td class="num">${peso(r.fivejsCommission)}</td><td class="num" style="font-weight:700;">${peso(r.earnings)}</td><td class="num">${peso(r.deductions)}</td><td class="num">${peso(r.takeHome)}</td></tr>`).join('')}
   </tbody><tfoot><tr style="font-weight:700;background:#fafbfc;"><td>GRAND TOTAL</td><td class="num">${peso(grand.payroll)}</td><td class="num">${peso(grand.licCommission)}</td><td class="num">${peso(grand.productionCommission)}</td><td class="num">${peso(grand.fivejsCommission)}</td><td class="num">${peso(grand.earnings)}</td><td class="num">${peso(grand.deductions)}</td><td class="num">${peso(grand.takeHome)}</td></tr></tfoot></table>
   ${rows.length===0?'<div class="empty-state">No payroll or commission data for this year yet.</div>':''}`;
+}
+function exportYtdCSV(){
+  const year = Number(document.getElementById('ytd_year').value);
+  const rows = computeYtdRows(year);
+  exportRowsToCSV(`YTD_Summary_${year}.csv`,
+    ['Employee','YTD Payroll','LIC Commission','Production Commission','5JS Commission','Total Income','Total Deductions','Total Take-Home'],
+    rows.map(r=>[r.lfm, r.payroll.toFixed(2), r.licCommission.toFixed(2), r.productionCommission.toFixed(2), r.fivejsCommission.toFixed(2), r.earnings.toFixed(2), r.deductions.toFixed(2), r.takeHome.toFixed(2)]));
 }
 // ---- Annual Report: every earnings category, totalled per employee for the whole year ----
 // This mirrors the "2026" tab in the user's old Excel workbook — but that sheet was just a flat
@@ -3886,7 +3953,8 @@ function renderAnnualReport(root){
     <div class="flexrow no-print">
       <select id="ann_year">${(years.length?years:[year]).map(y=>`<option value="${y}">${y}</option>`).join('')}</select>
       <select id="ann_month"><option value="0">All Months</option>${ANNUAL_MONTH_NAMES.map((m,i)=>`<option value="${i+1}">${m}</option>`).join('')}</select>
-      <button class="btn" onclick="exportAnnualReportCSV()">⬇ Export CSV</button>
+      <button class="btn" onclick="exportAnnualReportCSV()">⬇ Download Excel</button>
+      <button class="btn" onclick="printReport()">🖨 Download PDF</button>
     </div>
   </div><div class="section-body">
   <div id="annWrap" class="table-wrap"></div></div></div>`;
@@ -4017,43 +4085,59 @@ function exportAnnualReportCSV(){
   const rows = computeAnnualTotals(year, month);
   const header = ['Name','Basic Salary','Rest Day Pay','OT Pay','Holiday Pay','5JS Commission','LIC Commission',
     'Production Commission','Other Commission','13th Month','Allowance','Incentive Leave','Adjustment','SSS','PhilHealth','Pag-IBIG'];
-  const lines = [header.join(',')];
-  rows.forEach(r=>{
-    const row = [r.name, r.basicSalary.toFixed(2), r.restDayPay.toFixed(2), r.otPay.toFixed(2), r.holidayPay.toFixed(2),
-      r.fivejsCommission.toFixed(2), r.licCommission.toFixed(2), r.productionCommission.toFixed(2), r.otherCommission.toFixed(2),
-      r.thirteenthMonth.toFixed(2), r.allowance.toFixed(2), r.incentiveLeave.toFixed(2), r.adjustment.toFixed(2),
-      r.sss.toFixed(2), r.philhealth.toFixed(2), r.pagibig.toFixed(2)];
-    lines.push(row.map(v => `"${String(v).replace(/"/g,'""')}"`).join(','));
-  });
+  const dataRows = rows.map(r => [r.lfm, r.basicSalary.toFixed(2), r.restDayPay.toFixed(2), r.otPay.toFixed(2), r.holidayPay.toFixed(2),
+    r.fivejsCommission.toFixed(2), r.licCommission.toFixed(2), r.productionCommission.toFixed(2), r.otherCommission.toFixed(2),
+    r.thirteenthMonth.toFixed(2), r.allowance.toFixed(2), r.incentiveLeave.toFixed(2), r.adjustment.toFixed(2),
+    r.sss.toFixed(2), r.philhealth.toFixed(2), r.pagibig.toFixed(2)]);
   const label = month ? `${ANNUAL_MONTH_NAMES[month-1]}_${year}` : `${year}`;
-  downloadText(lines.join('\n'), `Annual_Report_${label}.csv`, 'text/csv');
+  exportRowsToCSV(`Annual_Report_${label}.csv`, header, dataRows);
 }
 function renderRunSummaryReport(root){
   const runs = [...state.runs].sort((a,b)=> new Date(b.periodEnd)-new Date(a.periodEnd));
   if(!runs.length){ root.innerHTML = `<div class="empty-state">No payroll runs yet.</div>`; return; }
   root.innerHTML = `<div class="section"><div class="section-head">
     <div><h3>Payroll Run Summary</h3></div>
-    <div class="flexrow no-print"><select id="rs_run">${runs.map(r=>`<option value="${r.id}">${fmtDate(r.periodStart)} – ${fmtDate(r.periodEnd)}</option>`).join('')}</select></div>
+    <div class="flexrow no-print"><select id="rs_run">${runs.map(r=>`<option value="${r.id}">${fmtDate(r.periodStart)} – ${fmtDate(r.periodEnd)}</option>`).join('')}</select>
+      <button class="btn" onclick="exportRunSummaryCSV()">⬇ Download Excel</button>
+      <button class="btn" onclick="printReport()">🖨 Download PDF</button></div>
   </div><div class="section-body"><div id="rsWrap" class="table-wrap"></div></div></div>`;
   document.getElementById('rs_run').addEventListener('change', renderRunSummaryTable);
   renderRunSummaryTable();
+}
+// Shared by renderRunSummaryTable and exportRunSummaryCSV.
+function computeRunSummaryRows(run){
+  return sortEntriesByName(run.entries).map(en=>{
+    const emp=empById(en.employeeId); if(!emp) return null;
+    const c=calcEntry(emp,en,run);
+    return { lfm: displayNameLFM(emp), earnings:c.totalEarnings, deductions:c.totalDeductions,
+      adjustment:num(en.adjustment), adjustmentNote:en.adjustmentNote||'', takeHome:c.takeHome };
+  }).filter(Boolean);
 }
 function renderRunSummaryTable(){
   const wrap = document.getElementById('rsWrap'); if(!wrap) return;
   const run = state.runs.find(r=>r.id===document.getElementById('rs_run').value);
   if(!run) return;
   let e=0,d=0,t=0,adjTotal=0;
-  const rows = sortEntriesByName(run.entries).map(en=>{ const emp=empById(en.employeeId); if(!emp) return ''; const c=calcEntry(emp,en,run); e+=c.totalEarnings; d+=c.totalDeductions; t+=c.takeHome; adjTotal += num(en.adjustment);
+  const rowData = computeRunSummaryRows(run);
+  const rows = rowData.map(r=>{ e+=r.earnings; d+=r.deductions; t+=r.takeHome; adjTotal += r.adjustment;
     // Adjustment and its Reason are broken out here (even though Adjustment is already folded into
     // Earnings above) specifically so anything unusual about this run's pay — a correction, a
     // one-off bonus, a deduction for a prior overpayment, etc. — stays visible and explained
     // whenever this report is looked at later, instead of being an unexplained number.
-    return `<tr><td>${esc(displayNameLFM(emp))}</td><td class="num">${peso(c.totalEarnings)}</td><td class="num">${peso(c.totalDeductions)}</td>
-      <td class="num" style="${num(en.adjustment)!==0?'font-weight:600;':''}">${num(en.adjustment)!==0 ? peso(en.adjustment) : '—'}</td>
-      <td style="white-space:normal;min-width:160px;color:${en.adjustmentNote?'inherit':'#999'};">${esc(en.adjustmentNote || (num(en.adjustment)!==0 ? '(no reason noted)' : ''))}</td>
-      <td class="num">${peso(c.takeHome)}</td></tr>`; }).join('');
+    return `<tr><td>${esc(r.lfm)}</td><td class="num">${peso(r.earnings)}</td><td class="num">${peso(r.deductions)}</td>
+      <td class="num" style="${r.adjustment!==0?'font-weight:600;':''}">${r.adjustment!==0 ? peso(r.adjustment) : '—'}</td>
+      <td style="white-space:normal;min-width:160px;color:${r.adjustmentNote?'inherit':'#999'};">${esc(r.adjustmentNote || (r.adjustment!==0 ? '(no reason noted)' : ''))}</td>
+      <td class="num">${peso(r.takeHome)}</td></tr>`; }).join('');
   wrap.innerHTML = `<table class="sortable"><thead><tr><th>Employee</th><th class="num">Earnings</th><th class="num">Deductions</th><th class="num">Adjustment</th><th>Reason</th><th class="num">Take-Home</th></tr></thead>
   <tbody>${rows}</tbody><tfoot><tr style="font-weight:700;background:#fafbfc;"><td>TOTAL</td><td class="num">${peso(e)}</td><td class="num">${peso(d)}</td><td class="num">${peso(adjTotal)}</td><td></td><td class="num">${peso(t)}</td></tr></tfoot></table>`;
+}
+function exportRunSummaryCSV(){
+  const run = state.runs.find(r=>r.id===document.getElementById('rs_run').value);
+  if(!run) return;
+  const rowData = computeRunSummaryRows(run);
+  exportRowsToCSV(`Payroll_Run_Summary_${run.periodStart}_to_${run.periodEnd}.csv`,
+    ['Employee','Earnings','Deductions','Adjustment','Reason','Take-Home'],
+    rowData.map(r=>[r.lfm, r.earnings.toFixed(2), r.deductions.toFixed(2), r.adjustment.toFixed(2), r.adjustmentNote, r.takeHome.toFixed(2)]));
 }
 const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 function renderDeductionsReport(root){
@@ -4066,6 +4150,8 @@ function renderDeductionsReport(root){
       <select id="ded_emp"><option value="all">All Employees</option>${emps.map(e=>`<option value="${e.id}">${esc(displayNameLFM(e))}</option>`).join('')}</select>
       <select id="ded_year">${(years.length?years:[year]).map(y=>`<option value="${y}">${y}</option>`).join('')}</select>
       <select id="ded_month"><option value="all">All Months</option>${MONTH_NAMES.map((m,i)=>`<option value="${i+1}">${m}</option>`).join('')}</select>
+      <button class="btn" onclick="exportDeductionsCSV()">⬇ Download Excel</button>
+      <button class="btn" onclick="printReport()">🖨 Download PDF</button>
     </div>
   </div><div class="section-body"><div id="dedWrap" class="table-wrap"></div></div></div>`;
   document.getElementById('ded_emp').addEventListener('change', ()=>{ updDedMonthVisibility(); renderDeductionsTable(); });
@@ -4140,6 +4226,52 @@ function renderDeductionsTable(){
   </tbody><tfoot><tr style="font-weight:700;background:#fafbfc;"><td>GRAND TOTAL</td><td class="num">${peso(grand.basic)}</td><td class="num">${peso(grand.sss)}</td><td class="num">${peso(grand.philhealth)}</td><td class="num">${peso(grand.pagibig)}</td><td class="num">${peso(grand.loan)}</td><td class="num">${peso(grand.cashAdvance)}</td><td class="num">${peso(grand.other)}</td><td class="num">${peso(grand.late)}</td><td class="num">${peso(grand.undertime)}</td><td class="num">${peso(rowTotal(grand))}</td></tr></tfoot></table>
   ${rows.length===0?'<div class="empty-state">No deductions recorded for this period.</div>':''}`;
 }
+function exportDeductionsCSV(){
+  const year = Number(document.getElementById('ded_year').value);
+  const monthSel = document.getElementById('ded_month').value;
+  const month = monthSel === 'all' ? null : Number(monthSel);
+  const empSel = document.getElementById('ded_emp') ? document.getElementById('ded_emp').value : 'all';
+  const empty = () => ({basic:0, sss:0, philhealth:0, pagibig:0, loan:0, cashAdvance:0, other:0, late:0, undertime:0});
+  const rowTotal = r => r.sss+r.philhealth+r.pagibig+r.loan+r.cashAdvance+r.other+r.late+r.undertime;
+  const addInto = (t, c) => { t.basic += c.basicSalary; t.sss += c.sss; t.philhealth += c.philhealth; t.pagibig += c.pagibig;
+    t.loan += c.loanDeduction; t.cashAdvance += c.cashAdvanceDeduction; t.other += c.otherDeduction; t.late += c.lateDeduction; t.undertime += c.undertimeDeduction; };
+  const header = ['Basic Salary','SSS','PhilHealth','Pag-IBIG','Loan','Cash Adv.','Other','Late Ded.','Undertime Ded.','Total'];
+  if(empSel !== 'all'){
+    const emp = empById(empSel);
+    const byMonth = MONTH_NAMES.map(()=>empty());
+    state.runs.forEach(r=>{
+      const d = new Date(r.periodEnd);
+      if(d.getFullYear() !== year) return;
+      const en = r.entries.find(e=>e.employeeId===empSel);
+      if(!en || !emp) return;
+      addInto(byMonth[d.getMonth()], calcEntry(emp, en, r));
+    });
+    const grand = byMonth.reduce((a,m)=>{ Object.keys(a).forEach(k=>a[k]+=m[k]); return a; }, empty());
+    const rows = MONTH_NAMES.map((mn,i)=>{ const m=byMonth[i]; return [mn, m.basic.toFixed(2), m.sss.toFixed(2), m.philhealth.toFixed(2), m.pagibig.toFixed(2), m.loan.toFixed(2), m.cashAdvance.toFixed(2), m.other.toFixed(2), m.late.toFixed(2), m.undertime.toFixed(2), rowTotal(m).toFixed(2)]; });
+    rows.push(['YEAR TOTAL', grand.basic.toFixed(2), grand.sss.toFixed(2), grand.philhealth.toFixed(2), grand.pagibig.toFixed(2), grand.loan.toFixed(2), grand.cashAdvance.toFixed(2), grand.other.toFixed(2), grand.late.toFixed(2), grand.undertime.toFixed(2), rowTotal(grand).toFixed(2)]);
+    exportRowsToCSV(`Deductions_Summary_${(emp?emp.name:'employee').replace(/[^a-zA-Z0-9]+/g,'_')}_${year}.csv`, ['Month', ...header], rows);
+    return;
+  }
+  const totals = {};
+  const ensure = (emp) => { if(!totals[emp.id]) totals[emp.id] = {lfm:displayNameLFM(emp), surnameKey:surnameKeyForEmp(emp), name:emp.name, ...empty()}; return totals[emp.id]; };
+  state.runs.forEach(r=>{
+    const d = new Date(r.periodEnd);
+    if(d.getFullYear() !== year) return;
+    if(month !== null && (d.getMonth()+1) !== month) return;
+    r.entries.forEach(en=>{
+      const emp = empById(en.employeeId); if(!emp) return;
+      const c = calcEntry(emp, en, r);
+      if(!c.basicSalary && !c.sss && !c.philhealth && !c.pagibig && !c.loanDeduction && !c.cashAdvanceDeduction && !c.otherDeduction && !c.lateDeduction && !c.undertimeDeduction) return;
+      addInto(ensure(emp), c);
+    });
+  });
+  const rowsSorted = Object.values(totals).sort((a,b)=> a.surnameKey.localeCompare(b.surnameKey) || a.name.localeCompare(b.name));
+  const grand = rowsSorted.reduce((a,r)=>{ Object.keys(empty()).forEach(k=>a[k]+=r[k]); return a; }, empty());
+  const rows = rowsSorted.map(r=>[r.lfm, r.basic.toFixed(2), r.sss.toFixed(2), r.philhealth.toFixed(2), r.pagibig.toFixed(2), r.loan.toFixed(2), r.cashAdvance.toFixed(2), r.other.toFixed(2), r.late.toFixed(2), r.undertime.toFixed(2), rowTotal(r).toFixed(2)]);
+  rows.push(['GRAND TOTAL', grand.basic.toFixed(2), grand.sss.toFixed(2), grand.philhealth.toFixed(2), grand.pagibig.toFixed(2), grand.loan.toFixed(2), grand.cashAdvance.toFixed(2), grand.other.toFixed(2), grand.late.toFixed(2), grand.undertime.toFixed(2), rowTotal(grand).toFixed(2)]);
+  const label = month===null ? `${year}_full_year` : `${MONTH_NAMES[month-1]}_${year}`;
+  exportRowsToCSV(`Deductions_Summary_${label}.csv`, ['Employee', ...header], rows);
+}
 function renderTimesheetReport(root){
   const emps = sortByName(activeEmployees());
   const now = new Date();
@@ -4151,17 +4283,16 @@ function renderTimesheetReport(root){
       <select id="tsr_emp">${emps.map(e=>`<option value="${e.id}">${esc(displayNameLFM(e))}</option>`).join('')}</select>
       <input type="date" id="tsr_from" value="${defaultFrom}"><span>to</span><input type="date" id="tsr_to" value="${defaultTo}">
       <button class="btn" onclick="renderTimesheetReportTable()">Apply</button>
+      <button class="btn" onclick="exportTimesheetCSV()">⬇ Download Excel</button>
+      <button class="btn" onclick="printReport()">🖨 Download PDF</button>
     </div>
   </div><div class="section-body"><div id="tsrWrap" class="table-wrap"></div></div></div>`;
   renderTimesheetReportTable();
 }
-function renderTimesheetReportTable(){
-  const wrap = document.getElementById('tsrWrap'); if(!wrap) return;
-  const empId = document.getElementById('tsr_emp') ? document.getElementById('tsr_emp').value : null;
-  const from = document.getElementById('tsr_from') ? document.getElementById('tsr_from').value : `${new Date().getFullYear()}-01-01`;
-  const to = document.getElementById('tsr_to') ? document.getElementById('tsr_to').value : todayISO();
+// Shared by renderTimesheetReportTable and exportTimesheetCSV.
+function computeTimesheetDays(empId, from, to){
   const emp = empId ? empById(empId) : null;
-  if(!emp){ wrap.innerHTML = `<div class="empty-state">No employees found.</div>`; return; }
+  if(!emp) return { emp:null, days:[] };
   const days = [];
   [...state.runs].sort((a,b)=> new Date(a.periodStart)-new Date(b.periodStart)).forEach(r=>{
     const en = r.entries.find(e=>e.employeeId===empId);
@@ -4175,6 +4306,15 @@ function renderTimesheetReportTable(){
       days.push({ ...day, hoursWorked, lateMinutes, undertimeMinutes, otHours: (otMinutes||0)/60, isRestDay, periodStart:r.periodStart, periodEnd:r.periodEnd });
     });
   });
+  return { emp, days };
+}
+function renderTimesheetReportTable(){
+  const wrap = document.getElementById('tsrWrap'); if(!wrap) return;
+  const empId = document.getElementById('tsr_emp') ? document.getElementById('tsr_emp').value : null;
+  const from = document.getElementById('tsr_from') ? document.getElementById('tsr_from').value : `${new Date().getFullYear()}-01-01`;
+  const to = document.getElementById('tsr_to') ? document.getElementById('tsr_to').value : todayISO();
+  const { emp, days } = computeTimesheetDays(empId, from, to);
+  if(!emp){ wrap.innerHTML = `<div class="empty-state">No employees found.</div>`; return; }
   let totalHours=0, totalLate=0, totalOt=0, totalRestDay=0, totalUndertime=0, daysWorked=0;
   const rows = days.map(day=>{
     if(day.isRestDay){ totalRestDay += day.hoursWorked; } else { totalHours += day.hoursWorked; totalLate += day.lateMinutes; totalOt += num(day.otHours); totalUndertime += day.undertimeMinutes; }
@@ -4193,6 +4333,23 @@ function renderTimesheetReportTable(){
   <table class="sortable"><thead><tr><th>Date</th><th>Time In</th><th>Lunch Out</th><th>Lunch In</th><th>Time Out</th><th class="num">Hrs Worked</th><th class="num">Late (min)</th><th class="num">Undertime (min)</th><th class="num">OT Hrs</th><th class="num">Rest Day Hrs</th><th>Remarks</th></tr></thead>
   <tbody>${rows}</tbody></table>
   ${days.length===0?'<div class="empty-state">No time sheet records for this employee in this date range.</div>':''}`;
+}
+function exportTimesheetCSV(){
+  const empId = document.getElementById('tsr_emp') ? document.getElementById('tsr_emp').value : null;
+  const from = document.getElementById('tsr_from').value, to = document.getElementById('tsr_to').value;
+  const { emp, days } = computeTimesheetDays(empId, from, to);
+  if(!emp) return;
+  const rows = days.map(day=>[
+    fmtDate(day.date), day.timeIn||'', day.lunchOut||'', day.lunchIn||'', day.timeOut||'',
+    day.isRestDay ? '' : day.hoursWorked.toFixed(2),
+    day.isRestDay ? '' : day.lateMinutes.toFixed(0),
+    day.isRestDay ? '' : day.undertimeMinutes.toFixed(0),
+    day.isRestDay ? '' : num(day.otHours).toFixed(2),
+    day.isRestDay ? day.hoursWorked.toFixed(2) : '',
+    day.remarks||''
+  ]);
+  exportRowsToCSV(`Time_Sheet_${emp.name.replace(/[^a-zA-Z0-9]+/g,'_')}_${from}_to_${to}.csv`,
+    ['Date','Time In','Lunch Out','Lunch In','Time Out','Hrs Worked','Late (min)','Undertime (min)','OT Hrs','Rest Day Hrs','Remarks'], rows);
 }
 
 /* ===================== SETTINGS ===================== */
