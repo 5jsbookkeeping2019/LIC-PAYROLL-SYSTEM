@@ -218,7 +218,7 @@ small.hint{display:block;color:var(--ink-soft);font-size:11.5px;margin-top:3px;}
     <h2 style="margin:0 0 4px;">LIC Printing Corporation</h2>
     <div id="loginSubtitle" style="color:#666;font-size:13px;margin-bottom:18px;">Sign in to access payroll</div>
     <div style="display:flex;gap:8px;margin-bottom:18px;">
-      <button type="button" id="roleTabAdmin" onclick="setLoginRole('admin')" style="flex:1;padding:9px;border-radius:7px;border:1px solid var(--line);font-weight:600;font-size:13px;cursor:pointer;">🔒 Admin</button>
+      <button type="button" id="roleTabAdmin" onclick="setLoginRole('admin')" style="flex:1;padding:9px;border-radius:7px;border:1px solid var(--line);font-weight:600;font-size:13px;cursor:pointer;">🔒 Administrator</button>
       <button type="button" id="roleTabEmployee" onclick="setLoginRole('employee')" style="flex:1;padding:9px;border-radius:7px;border:1px solid var(--line);font-weight:600;font-size:13px;cursor:pointer;">👤 Employee</button>
     </div>
     <div id="adminLoginForm" style="display:flex;flex-direction:column;gap:10px;">
@@ -312,7 +312,8 @@ function defaultState(){
       restDayMultiplier: 1.30,
       philhealth: { mode: "flat", flat: 250, percent: 2.5, min: 0, max: 100000 },
       pagibig: { mode: "flat", flat: 200, percent: 2, cap: 100 },
-      sss: STARTER_SSS
+      sss: STARTER_SSS,
+      hrEmails: []
     },
     employees: STARTER_EMPLOYEES,
     runs: STARTER_RUNS,
@@ -340,6 +341,7 @@ const AUTOSAVE_DELAY_MS = 3000;
 let autosaveTimer = null;
 let autosaving = false;
 function markDirty(){
+  if(currentUserRole === 'hr') return; // view-only account: nothing it does should ever be considered a pending change
   dirty = true; updateSaveBtn();
   if(autosaveTimer) clearTimeout(autosaveTimer);
   autosaveTimer = setTimeout(runAutosave, AUTOSAVE_DELAY_MS);
@@ -356,6 +358,63 @@ function updateSaveBtn(){
   if(!b) return;
   b.textContent = autosaving ? "☁️ Saving…" : (dirty ? "☁️ Unsaved changes…" : "☁️ Saved to Cloud");
   b.classList.toggle('btn-primary', true);
+}
+
+/* ===================== HR / VIEW-ONLY ROLE ENFORCEMENT ===================== */
+// currentUserRole is determined once per sign-in, right after state loads from the cloud
+// (see loadStateFromCloud), by checking the signed-in email against state.settings.hrEmails.
+// Two layers of enforcement:
+//  Layer 1 (robust): markDirty() / saveStateToCloud() below refuse to persist anything for
+//    an 'hr' session, no matter what UI slips through — this is the real guarantee.
+//  Layer 2 (best-effort UX): applyReadOnlyMode() hides/disables every write control so an HR
+//    user never even sees an option to edit, backed by a MutationObserver so it re-applies
+//    automatically after every render, including sub-renders that update parts of the page
+//    directly without going through the top-level render() dispatcher.
+// IMPORTANT: this is a client-side convenience restriction only. There is no Supabase
+// Row Level Security policy behind it (this app only ever uses the public anon key), so a
+// technically sophisticated person could bypass the UI via browser dev tools — but Layer 1
+// means nothing they do that way could actually be saved to the shared cloud data.
+let currentUserRole = 'admin'; // 'admin' | 'hr'
+const HR_WRITE_PREFIXES = ['save','del','add','edit','toggle','apply','sync','migrate','transfer','reset','confirm','remove','mark','create','upd','auto','new','wageIncrease'];
+const HR_WRITE_EXCEPTIONS = ['openEntryEditModal','openTimesheetModal','openTimesheetPicker','runTransferHistory','setCommissionRun'];
+const HR_WRITE_ALLOW = ['saveData']; // matches a write-prefix but is actually read-only (downloads a backup file)
+function hrExtractFnName(attrVal){
+  const m = /^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\(/.exec(attrVal||'');
+  return m ? m[1] : null;
+}
+function isHrWriteAction(fnName){
+  if(!fnName) return false;
+  if(HR_WRITE_ALLOW.includes(fnName)) return false;
+  if(HR_WRITE_EXCEPTIONS.includes(fnName)) return true;
+  return HR_WRITE_PREFIXES.some(p => fnName.indexOf(p) === 0);
+}
+function applyReadOnlyMode(root){
+  if(currentUserRole !== 'hr') return;
+  root = root || document.body;
+  root.querySelectorAll('[onclick]').forEach(el=>{
+    const fn = hrExtractFnName(el.getAttribute('onclick'));
+    if(!isHrWriteAction(fn)) return;
+    if(el.tagName==='BUTTON'){ el.style.display = 'none'; }
+    else { el.onclick = null; }
+  });
+  root.querySelectorAll('[onchange]').forEach(el=>{
+    const fn = hrExtractFnName(el.getAttribute('onchange'));
+    if(!isHrWriteAction(fn)) return;
+    if(el.tagName==='INPUT'||el.tagName==='SELECT'||el.tagName==='TEXTAREA'){ el.disabled = true; }
+  });
+  // A few write controls wired via addEventListener (no onclick/onchange attribute), or whose
+  // onclick doesn't call a plain functionName(...) so the sweep above can't recognize them.
+  const btnSave = document.getElementById('btnSave'); if(btnSave) btnSave.style.display = 'none';
+  const btnLoad = document.getElementById('btnLoad'); if(btnLoad) btnLoad.style.display = 'none';
+  const fileInput = document.getElementById('fileInput'); if(fileInput) fileInput.disabled = true;
+  const btnLoadDataFile = document.getElementById('btnLoadDataFile'); if(btnLoadDataFile) btnLoadDataFile.style.display = 'none';
+}
+let hrObserver = null;
+function startReadOnlyObserver(){
+  if(currentUserRole !== 'hr' || hrObserver) return;
+  applyReadOnlyMode(document.body);
+  hrObserver = new MutationObserver(()=>{ applyReadOnlyMode(document.body); });
+  hrObserver.observe(document.body, { childList: true, subtree: true });
 }
 
 /* ===================== CLOUD / AUTH (Supabase) ===================== */
@@ -414,6 +473,8 @@ async function handleLogin(){
 }
 function onSignedOut(){
   cloudLoaded = false;
+  currentUserRole = 'admin';
+  if(hrObserver){ hrObserver.disconnect(); hrObserver = null; }
   document.getElementById('loginScreen').style.display = 'flex';
   document.getElementById('app').style.display = 'none';
   document.getElementById('employeePortal').style.display = 'none';
@@ -422,10 +483,16 @@ function onSignedOut(){
 async function onAuthed(session){
   document.getElementById('loginScreen').style.display = 'none';
   document.getElementById('app').style.display = '';
-  document.getElementById('authEmailLabel').textContent = 'Signed in as ' + (session.user.email || '');
   if(!cloudLoaded){
     await loadStateFromCloud();
     cloudLoaded = true;
+  }
+  const email = (session.user.email || '').trim().toLowerCase();
+  currentUserRole = (state.settings.hrEmails||[]).includes(email) ? 'hr' : 'admin';
+  document.getElementById('authEmailLabel').textContent = 'Signed in as ' + (session.user.email || '') + (currentUserRole==='hr' ? ' — View-Only' : '');
+  if(currentUserRole === 'hr'){
+    dirty = false; updateSaveBtn();
+    startReadOnlyObserver();
   }
 }
 async function loadStateFromCloud(){
@@ -441,9 +508,11 @@ async function loadStateFromCloud(){
     state = defaultState();
     await saveStateToCloud(true);
   }
+  if(!state.settings.hrEmails) state.settings.hrEmails = [];
   dirty = false; updateSaveBtn(); initPageFromHash(); render();
 }
 async function saveStateToCloud(silent){
+  if(currentUserRole === 'hr'){ if(!silent) toast("View-only account: changes are not saved"); return false; }
   if(autosaveTimer){ clearTimeout(autosaveTimer); autosaveTimer = null; } // a save is happening now, no need for the pending autosave tick too
   state.meta.savedAt = new Date().toISOString();
   const { data: { user } } = await sb.auth.getUser();
@@ -4417,10 +4486,26 @@ function renderSettings(root){
     <div class="section-head"><h3>Data File</h3></div>
     <div class="section-body flexrow">
       <button class="btn btn-primary" onclick="saveData()">💾 Save Data to File</button>
-      <button class="btn" onclick="document.getElementById('fileInput').click()">📂 Load Data from File</button>
+      <button class="btn" id="btnLoadDataFile" onclick="document.getElementById('fileInput').click()">📂 Load Data from File</button>
       <span class="muted">Last saved: ${state.meta.savedAt ? fmtDate(state.meta.savedAt) : 'never in this session'}</span>
     </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head"><h3>HR / View-Only Access</h3><div class="desc">Anyone who signs in with one of these email addresses (via the same "🔒 Administrator" tab on the login screen, using a Supabase Auth account you create for them yourself in your Supabase project's Authentication settings) can see everything in this system — Reports, Employees, Payroll Runs, Payslips, Loans, Commissions, Leave, Settings — but every Add/Edit/Delete/Save action is hidden or disabled for them, and nothing they do can be saved to the cloud even if they find a way to try. This is a convenience restriction built into this file, not a database-enforced one — see the note below.</div></div>
+    <div class="section-body">
+      <div class="field"><label>HR / View-Only email addresses (one per line)</label>
+        <textarea id="hr_emails" rows="4" style="width:100%;font-family:inherit;font-size:13px;padding:8px;border:1px solid var(--line);border-radius:8px;" placeholder="hr@licprinting.com">${esc((state.settings.hrEmails||[]).join('\n'))}</textarea>
+      </div>
+      <button class="btn btn-primary" style="margin-top:8px;" onclick="saveAccessSettings()">Save Access Settings</button>
+      <div class="helpbox" style="margin-top:10px;">To actually create the sign-in for someone on this list: open your Supabase project → Authentication → Users → Add user, and set their email (matching exactly what's typed above) and a password you give them. This app can't create that account for you. For a hard guarantee that a view-only account can never write to the database — even by someone opening the browser console — ask a developer to add a Row Level Security policy on the <code>payroll_state</code> table in Supabase restricting UPDATE/INSERT to specific user emails; without that, this list only controls what THIS app's own interface shows and allows.</div>
+    </div>
   </div>`;
+}
+function saveAccessSettings(){
+  const raw = document.getElementById('hr_emails').value;
+  state.settings.hrEmails = raw.split('\n').map(s=>s.trim().toLowerCase()).filter(Boolean);
+  markDirty(); toast("Access settings saved");
 }
 function saveCompanyInfo(){
   state.company = { name: document.getElementById('co_name').value, address: document.getElementById('co_address').value,
