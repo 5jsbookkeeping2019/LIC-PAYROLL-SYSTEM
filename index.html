@@ -654,8 +654,38 @@ function toast(msg){
 }
 function activeEmployees(){ return state.employees.filter(e=>e.active !== false); }
 function empById(id){ return state.employees.find(e=>e.id===id); }
-function sortByName(list){ return [...list].sort((a,b)=>a.name.localeCompare(b.name)); }
-// Sort a run's entries alphabetically by the employee's name for display, without touching
+// Names are stored as one free-text field ("MARY ROSE ALAMANI"), first-name-first — there's no
+// separate Last Name field. Everywhere the app alphabetizes employees, Jamie wants that to go by
+// SURNAME, not by however the full name happens to start. This pulls out a best-guess surname: the
+// last word is always part of it, and any common Filipino surname particle directly before it (de,
+// dela, del, delos, de la, san, sta, mc, van, ...) is folded in too, so "Juan Dela Cruz" sorts as
+// "Dela Cruz" under D, not "Cruz" under C. A trailing suffix (Jr., Sr., III, ...) is ignored first so
+// it never gets mistaken for the surname itself.
+const SURNAME_PARTICLES = new Set(['de','dela','del','delos','delas','de la','de los','de las','san','sta','santo','santa','mc','mac','van','von','dos','das','di']);
+const NAME_SUFFIXES = new Set(['jr','jr.','sr','sr.','ii','iii','iv','v']);
+function getSurname(fullName){
+  const words = String(fullName||'').trim().split(/\s+/).filter(Boolean);
+  if(!words.length) return '';
+  let end = words.length;
+  if(end>1 && NAME_SUFFIXES.has(words[end-1].toLowerCase().replace(/,$/,''))) end--;
+  if(end<1) return words.join(' ');
+  let start = end-1;
+  // Walk backward absorbing surname particles immediately before the base surname word. Checked as
+  // a 2-word phrase first (handles "De La"/"De Los"/"De Las" written as separate words) then as a
+  // single word (handles the more common one-word "Dela"/"Delos"/"Delas" spelling) so both forms of
+  // the same particle are recognized, since a plain word-by-word check alone can never match a
+  // 2-word entry like 'de la' against a single token.
+  while(start>0){
+    if(start>1 && SURNAME_PARTICLES.has((words[start-2]+' '+words[start-1]).toLowerCase())){ start -= 2; continue; }
+    if(SURNAME_PARTICLES.has(words[start-1].toLowerCase())){ start -= 1; continue; }
+    break;
+  }
+  return words.slice(start, end).join(' ');
+}
+function sortByName(list){
+  return [...list].sort((a,b)=> getSurname(a.name).localeCompare(getSurname(b.name)) || a.name.localeCompare(b.name));
+}
+// Sort a run's entries alphabetically by the employee's SURNAME for display, without touching
 // the underlying stored order (entries are matched by employeeId everywhere, not by position).
 function sortEntriesByName(entries){
   return [...entries].sort((a,b)=>{
@@ -663,7 +693,7 @@ function sortEntriesByName(entries){
     if(!ea && !eb) return 0;
     if(!ea) return 1;
     if(!eb) return -1;
-    return ea.name.localeCompare(eb.name);
+    return getSurname(ea.name).localeCompare(getSurname(eb.name)) || ea.name.localeCompare(eb.name);
   });
 }
 
@@ -3970,7 +4000,7 @@ function renderDeductionsTable(){
     r.entries.forEach(en=>{
       const emp = empById(en.employeeId); if(!emp) return;
       const c = calcEntry(emp, en, r);
-      if(!c.sss && !c.philhealth && !c.pagibig && !c.loanDeduction && !c.cashAdvanceDeduction && !c.otherDeduction && !c.lateDeduction && !c.undertimeDeduction) return;
+      if(!c.basicSalary && !c.sss && !c.philhealth && !c.pagibig && !c.loanDeduction && !c.cashAdvanceDeduction && !c.otherDeduction && !c.lateDeduction && !c.undertimeDeduction) return;
       addInto(ensure(emp), c);
     });
   });
