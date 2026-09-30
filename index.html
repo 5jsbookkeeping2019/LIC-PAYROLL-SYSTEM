@@ -663,12 +663,16 @@ function empById(id){ return state.employees.find(e=>e.id===id); }
 // it never gets mistaken for the surname itself.
 const SURNAME_PARTICLES = new Set(['de','dela','del','delos','delas','de la','de los','de las','san','sta','santo','santa','mc','mac','van','von','dos','das','di']);
 const NAME_SUFFIXES = new Set(['jr','jr.','sr','sr.','ii','iii','iv','v']);
-function getSurname(fullName){
+// Shared by getSurname() and splitNameGuess(): splits a free-text full name into
+// { words, start, end } where words.slice(start,end) is the surname block (with particles folded
+// in) and words.slice(0,start) is everything before it (first + middle name material). A trailing
+// suffix (Jr., Sr., III, ...) is excluded from `end` so it's never mistaken for part of the surname.
+function surnameBounds(fullName){
   const words = String(fullName||'').trim().split(/\s+/).filter(Boolean);
-  if(!words.length) return '';
+  if(!words.length) return { words, start:0, end:0 };
   let end = words.length;
   if(end>1 && NAME_SUFFIXES.has(words[end-1].toLowerCase().replace(/,$/,''))) end--;
-  if(end<1) return words.join(' ');
+  if(end<1) return { words, start:0, end:words.length };
   let start = end-1;
   // Walk backward absorbing surname particles immediately before the base surname word. Checked as
   // a 2-word phrase first (handles "De La"/"De Los"/"De Las" written as separate words) then as a
@@ -680,10 +684,59 @@ function getSurname(fullName){
     if(SURNAME_PARTICLES.has(words[start-1].toLowerCase())){ start -= 1; continue; }
     break;
   }
+  return { words, start, end };
+}
+function getSurname(fullName){
+  const { words, start, end } = surnameBounds(fullName);
   return words.slice(start, end).join(' ');
 }
+// Best-guess split of a free-text full name into { lastName, firstName, middleName }, used to
+// pre-fill the Last/First/Middle Name fields (see editEmployee) for any employee not yet migrated,
+// and by the bulk "Migrate Names" tool. Everything before the surname block is first/middle-name
+// material; when 2+ words remain, the single word immediately before the surname is guessed as the
+// middle name (commonly the mother's maiden name in Filipino naming) and everything before THAT is
+// the first name — this is only ever a starting point, always shown for review before saving, since
+// a genuinely multi-word first name (e.g. "Mary Rose") can't be told apart from First+Middle by a
+// flat string alone.
+function splitNameGuess(fullName){
+  const { words, start, end } = surnameBounds(fullName);
+  // A trailing suffix (Jr., Sr., III, ...) sits right after `end` and is otherwise dropped entirely
+  // by surnameBounds — there's no separate Suffix field on the employee record, so it's folded back
+  // onto the end of the Last Name guess here instead of being silently lost (e.g. "Camaddo Jr."
+  // rather than just "Camaddo"). Whoever reviews the split can still edit it out if they'd rather
+  // track it differently.
+  const suffix = words.slice(end).join(' ');
+  const lastName = words.slice(start, end).join(' ') + (suffix ? ' '+suffix : '');
+  const remaining = words.slice(0, start);
+  if(remaining.length >= 2){
+    return { lastName, firstName: remaining.slice(0, -1).join(' '), middleName: remaining[remaining.length-1] };
+  }
+  return { lastName, firstName: remaining.join(' '), middleName: '' };
+}
+// An employee whose record has been split into structured Last/First/Middle Name fields (see
+// editEmployee) has an exact, Jamie-confirmed surname on file — surnameKeyForEmp uses that directly
+// instead of falling back to the getSurname() guess, which only ever exists to handle employees not
+// yet migrated to the structured fields.
+function surnameKeyForEmp(emp){
+  if(!emp) return '';
+  if(emp.lastName && emp.lastName.trim()) return emp.lastName.trim();
+  return getSurname(emp.name);
+}
+// "Lastname, Firstname Middlename" — the display format used across Reports and employee pickers
+// once an employee has been split into structured fields. Falls back to the plain stored Name for
+// anyone not yet migrated, so nothing breaks for records still awaiting review in the Migrate Names
+// tool.
+function displayNameLFM(emp){
+  if(!emp) return '';
+  if(emp.lastName && emp.lastName.trim()){
+    const first = (emp.firstName||'').trim();
+    const middle = (emp.middleName||'').trim();
+    return `${emp.lastName.trim()}, ${first}${middle ? ' '+middle : ''}`.trim();
+  }
+  return emp.name || '';
+}
 function sortByName(list){
-  return [...list].sort((a,b)=> getSurname(a.name).localeCompare(getSurname(b.name)) || a.name.localeCompare(b.name));
+  return [...list].sort((a,b)=> surnameKeyForEmp(a).localeCompare(surnameKeyForEmp(b)) || (a.name||'').localeCompare(b.name||''));
 }
 // Sort a run's entries alphabetically by the employee's SURNAME for display, without touching
 // the underlying stored order (entries are matched by employeeId everywhere, not by position).
@@ -693,7 +746,7 @@ function sortEntriesByName(entries){
     if(!ea && !eb) return 0;
     if(!ea) return 1;
     if(!eb) return -1;
-    return getSurname(ea.name).localeCompare(getSurname(eb.name)) || ea.name.localeCompare(eb.name);
+    return surnameKeyForEmp(ea).localeCompare(surnameKeyForEmp(eb)) || ea.name.localeCompare(eb.name);
   });
 }
 
@@ -1163,6 +1216,7 @@ function renderEmployees(root){
         <input class="search" id="empSearch" placeholder="Search name or position..." value="${esc(employeeSearch)}">
         <label class="checkline"><input type="checkbox" id="empShowInactive" ${employeeShowInactive?'checked':''}> Show inactive</label>
         <button class="btn" onclick="wageIncreaseModal()" title="Schedule a rate increase for everyone currently at a specific Rate/Day (e.g. a DOLE wage order)">💰 Apply Wage Increase</button>
+        ${state.employees.some(e=>!e.lastName) ? `<button class="btn" onclick="migrateNamesModal()" title="Split every employee's Name into Last/First/Middle Name, for review before saving">🔤 Split Names (Last/First/Middle)</button>` : ''}
         <button class="btn btn-primary" onclick="editEmployee(null)">+ Add Employee</button>
       </div>
     </div>
@@ -1207,7 +1261,7 @@ function renderEmpTable(){
     <th>Name</th><th>Position</th><th>Department</th><th class="num">Rate/Day</th><th class="num">Allowance</th><th>Date Hired</th><th>Status</th><th></th>
   </tr></thead><tbody>
   ${list.map(e=>`<tr style="cursor:pointer;" onclick="editEmployee('${e.id}')">
-    <td>${esc(e.name)}</td>
+    <td>${esc(displayNameLFM(e))}</td>
     <td>${esc(e.position)}</td>
     <td class="muted">${esc(e.department)}</td>
     <td class="num">${peso(e.rateDay)}${e.pendingRateDay!=null && e.pendingRateEffectiveDate ? `<div class="muted" style="font-size:11px;">→ ${peso(e.pendingRateDay)} starting ${fmtDate(e.pendingRateEffectiveDate)}</div>` : ''}</td>
@@ -1222,8 +1276,19 @@ function renderEmpTable(){
 function editEmployee(id){
   const e = id ? empById(id) : { id: uid('emp'), active:true, name:'', position:'', department:'', rateDay:0, allowance:0, paymentMethod:'cash' };
   const isNew = !id;
+  // Name is entered as three structured fields — Last, First, Middle — instead of one free-text
+  // field, so surname sorting/display across the app (getSurname/surnameKeyForEmp/displayNameLFM) is
+  // exact rather than guessed. An employee not yet split (no lastName on file) gets a starting guess
+  // via splitNameGuess() pre-filled here for Jamie to correct; the guess is never saved silently.
+  const lastName = e.lastName!=null ? e.lastName : splitNameGuess(e.name||'').lastName;
+  const firstName = e.firstName!=null ? e.firstName : splitNameGuess(e.name||'').firstName;
+  const middleName = e.middleName!=null ? e.middleName : splitNameGuess(e.name||'').middleName;
+  const nameNotYetConfirmed = !e.lastName && !!(e.name||'').trim();
   const body = `<div class="form-grid">
-    <div class="field"><label>Full Name</label><input id="f_name" value="${esc(e.name)}"></div>
+    <div class="field"><label>Last Name</label><input id="f_lastName" value="${esc(lastName)}"></div>
+    <div class="field"><label>First Name</label><input id="f_firstName" value="${esc(firstName)}"></div>
+    <div class="field"><label>Middle Name</label><input id="f_middleName" value="${esc(middleName)}"></div>
+    ${nameNotYetConfirmed ? `<div class="field" style="grid-column:1/-1;"><div class="helpbox" style="background:#fff4e5;border-color:#f0b429;">⚠ Last/First/Middle Name above is a best guess split from the old single Name field ("${esc(e.name)}") — please check it's correct before saving, especially if the First Name is actually two words (e.g. "Mary Rose").</div></div>` : ''}
     <div class="field"><label>Employee No.</label><input id="f_empNo" value="${esc(e.empNo||'')}"></div>
     <div class="field"><label>Position</label><input id="f_position" value="${esc(e.position||'')}"></div>
     <div class="field"><label>Department</label><input id="f_department" value="${esc(e.department||'')}"></div>
@@ -1280,7 +1345,7 @@ function transferHistoryModal(fromId){
     <div class="helpbox">Moving records changes which employee's rate, allowance, and details apply to that history — going forward AND for past periods on/after the date below. Use this when someone resigned and came back as a new employee record, and their newer payroll/loans/commissions are still pointing at the old record.</div>
     <div class="form-grid cols3" style="margin-top:12px;">
       <div class="field"><label>From (this record)</label><input value="${esc(from.name)} — ${esc(from.position||'')}" disabled></div>
-      <div class="field"><label>To (move records here)</label><select id="th_to" onchange="const o=this.selectedOptions[0]; const c=document.getElementById('th_cutoff'); if(o.dataset.hired) c.value=o.dataset.hired;">${others.map(e=>`<option value="${e.id}" data-hired="${esc(e.dateHired||'')}" ${e.id===sameNameId?'selected':''}>${esc(e.name)} ${e.active===false?'(Inactive)':''} — ${esc(e.position||'')}</option>`).join('')}</select></div>
+      <div class="field"><label>To (move records here)</label><select id="th_to" onchange="const o=this.selectedOptions[0]; const c=document.getElementById('th_cutoff'); if(o.dataset.hired) c.value=o.dataset.hired;">${others.map(e=>`<option value="${e.id}" data-hired="${esc(e.dateHired||'')}" ${e.id===sameNameId?'selected':''}>${esc(displayNameLFM(e))} ${e.active===false?'(Inactive)':''} — ${esc(e.position||'')}</option>`).join('')}</select></div>
       <div class="field"><label>Move records dated on/after</label><input id="th_cutoff" type="date" value="${esc((sameNameId && (others.find(e=>e.id===sameNameId)||{}).dateHired) || '')}"></div>
     </div>
     <div style="margin-top:10px;display:flex;flex-direction:column;gap:6px;">
@@ -1341,8 +1406,15 @@ function runTransferHistory(fromId){
 }
 function saveEmployee(id, isNew){
   const get = k => document.getElementById(k).value;
+  const lastName = get('f_lastName').trim(), firstName = get('f_firstName').trim(), middleName = get('f_middleName').trim();
+  // The single free-text Name field (used everywhere else in the app — payslips, the Employee
+  // Portal login match, disbursement lists, etc.) is composed from the three structured fields in
+  // the same "First Middle Last" word order the app has always stored, so re-saving an employee
+  // whose split is correct reproduces the exact same Name string as before and nothing downstream
+  // (especially Employee Portal login, which matches on Name + Birthday) breaks silently.
+  const name = [firstName, middleName, lastName].filter(Boolean).join(' ');
   const rec = {
-    id, name: get('f_name').trim(), empNo: get('f_empNo'), position: get('f_position'),
+    id, name, lastName, firstName, middleName, empNo: get('f_empNo'), position: get('f_position'),
     department: get('f_department'), rateDay: num(get('f_rateDay')),
     pendingRateDay: get('f_pendingRateDay').trim()!=='' ? num(get('f_pendingRateDay')) : null,
     pendingRateEffectiveDate: get('f_pendingRateEffectiveDate') || null,
@@ -1358,11 +1430,55 @@ function saveEmployee(id, isNew){
     isProductionDept: document.getElementById('f_isProductionDept').checked,
     active: isNew ? true : document.getElementById('f_active').checked
   };
-  if(!rec.name){ alert("Name is required"); return; }
+  if(!lastName){ alert("Last Name is required"); return; }
   if(rec.endDate) rec.active = false;
   if(isNew){ state.employees.push(rec); }
   else { const idx = state.employees.findIndex(x=>x.id===id); state.employees[idx] = {...state.employees[idx], ...rec}; }
   markDirty(); closeModal(); render(); toast("Employee saved");
+}
+// One-time bulk tool: lists every employee who hasn't been split into Last/First/Middle Name yet,
+// pre-filled with splitNameGuess()'s best guess, editable in place, so all of them can be reviewed
+// and corrected together instead of opening 59 separate Edit Employee modals one at a time. Saving
+// here only ever sets lastName/firstName/middleName (and recomposes name to match, same as
+// saveEmployee) — nothing else about the employee record is touched.
+function migrateNamesModal(){
+  const list = sortByName(state.employees.filter(e=>!e.lastName));
+  if(!list.length){ toast("Every employee already has a Last/First/Middle Name split on file"); return; }
+  const rows = list.map(e=>{
+    const guess = splitNameGuess(e.name||'');
+    return `<tr>
+      <td style="white-space:normal;max-width:180px;color:#666;">${esc(e.name)}</td>
+      <td><input id="mn_last_${e.id}" value="${esc(guess.lastName)}" style="width:100%;"></td>
+      <td><input id="mn_first_${e.id}" value="${esc(guess.firstName)}" style="width:100%;"></td>
+      <td><input id="mn_middle_${e.id}" value="${esc(guess.middleName)}" style="width:100%;"></td>
+    </tr>`;
+  }).join('');
+  const body = `
+  <div class="helpbox">Best-guess split shown below — please check each one, especially if the First Name is really two words (e.g. "Mary Rose", "Mark Anthony"): the guess assumes only the single word right before the surname is a Middle Name and everything earlier is the First Name, which isn't always right. Correct anything wrong, then Save All.</div>
+  <div class="table-wrap" style="max-height:60vh;overflow:auto;margin-top:10px;">
+  <table><thead><tr><th>Current Name on file</th><th>Last Name</th><th>First Name</th><th>Middle Name</th></tr></thead>
+  <tbody>${rows}</tbody></table></div>`;
+  const foot = `<button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="saveMigratedNames(${JSON.stringify(list.map(e=>e.id))})">Save All</button>`;
+  openModal("Split Names into Last / First / Middle", body, foot, {wide:true});
+}
+function saveMigratedNames(ids){
+  let skipped = 0;
+  ids.forEach(id=>{
+    const emp = empById(id); if(!emp) return;
+    const lastEl = document.getElementById(`mn_last_${id}`);
+    if(!lastEl) return; // shouldn't happen, but don't crash the whole batch over one missing row
+    const lastName = lastEl.value.trim();
+    const firstName = document.getElementById(`mn_first_${id}`).value.trim();
+    const middleName = document.getElementById(`mn_middle_${id}`).value.trim();
+    if(!lastName){ skipped++; return; } // leave unmigrated rather than saving a blank surname
+    emp.lastName = lastName; emp.firstName = firstName; emp.middleName = middleName;
+    // Recompose Name in the same First Middle Last order as before, so anything matching on the
+    // plain Name string elsewhere (payslips, Employee Portal login) only changes if the split
+    // actually corrected a typo/spelling — not just because it now comes from 3 fields.
+    emp.name = [firstName, middleName, lastName].filter(Boolean).join(' ');
+  });
+  markDirty(); closeModal(); render();
+  toast(skipped ? `Saved — ${skipped} left blank (Last Name required) and skipped` : "Names split and saved");
 }
 // Bulk version of setting "New Rate per Day" + "Effective Date" (see editEmployee) across every
 // ACTIVE employee currently at an exact matching Rate/Day — for a DOLE wage order or similar across-
@@ -1397,7 +1513,7 @@ function refreshWageIncreasePreview(){
   document.getElementById('wi_apply_btn').disabled = matches.length===0 || !effDate;
   if(!matches.length){ holder.innerHTML = `<div class="empty-state">No active employees currently at that exact Rate/Day.</div>`; return; }
   holder.innerHTML = `<div class="table-wrap"><table><thead><tr><th>Employee</th><th class="num">Current Rate</th><th class="num">New Rate</th></tr></thead><tbody>
-  ${matches.map(e=>`<tr><td>${esc(e.name)}</td><td class="num">${peso(e.rateDay)}</td><td class="num">${peso(num(e.rateDay)+increase)}</td></tr>`).join('')}
+  ${matches.map(e=>`<tr><td>${esc(displayNameLFM(e))}</td><td class="num">${peso(e.rateDay)}</td><td class="num">${peso(num(e.rateDay)+increase)}</td></tr>`).join('')}
   </tbody></table></div>
   <div class="helpbox" style="margin-top:8px;">${matches.length} employee${matches.length===1?'':'s'} will be scheduled to move to the new rate${effDate?` starting ${fmtDate(effDate)}`:''}. Any payroll run that's already started before that date is left completely alone — including one you may currently have open that straddles this date; add any partial-period difference for that one manually via its own Salary Adjustment field if needed.</div>`;
 }
@@ -2512,7 +2628,7 @@ function addEmployeeToRun(){
   const already = new Set(run.entries.map(e=>e.employeeId));
   const options = state.employees.filter(e=>!already.has(e.id));
   if(!options.length){ alert("All employees are already in this run."); return; }
-  const body = `<div class="field"><label>Employee</label><select id="addEmpSel">${options.map(e=>`<option value="${e.id}">${esc(e.name)}</option>`).join('')}</select></div>`;
+  const body = `<div class="field"><label>Employee</label><select id="addEmpSel">${options.map(e=>`<option value="${e.id}">${esc(displayNameLFM(e))}</option>`).join('')}</select></div>`;
   const foot = `<button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="confirmAddEmployeeToRun()">Add</button>`;
   openModal("Add Employee to Run", body, foot);
 }
@@ -2985,14 +3101,14 @@ function renderLeaveTable(){
     const balance = entitled - used;
     let notes = recs.map(r=>r.note).filter(Boolean).join(' | ');
     if(!eligible && !recs.length) notes = `Not yet eligible — less than 1 year since Date Hired (${fmtDate(emp.dateHired)})`;
-    return `<tr><td>${esc(emp.name)}</td><td class="num">${entitled}</td><td class="num">${used}</td><td class="num" style="font-weight:700;">${balance}</td><td class="muted" style="white-space:normal;">${esc(notes)}</td><td class="no-print"><button class="btn btn-sm" onclick="editEntitledPrompt('${emp.id}', ${year})" title="Directly correct this employee's Entitled/Used totals for ${year}">✎ Edit</button></td></tr>`;
+    return `<tr><td>${esc(displayNameLFM(emp))}</td><td class="num">${entitled}</td><td class="num">${used}</td><td class="num" style="font-weight:700;">${balance}</td><td class="muted" style="white-space:normal;">${esc(notes)}</td><td class="no-print"><button class="btn btn-sm" onclick="editEntitledPrompt('${emp.id}', ${year})" title="Directly correct this employee's Entitled/Used totals for ${year}">✎ Edit</button></td></tr>`;
   }).join('')}
   </tbody></table>`;
 }
 function addLeaveRecordModal(){
   const emps = sortByName(activeEmployees());
   const body = `<div class="form-grid cols3">
-    <div class="field"><label>Employee</label><select id="lv_emp">${emps.map(e=>`<option value="${e.id}">${esc(e.name)}</option>`).join('')}</select></div>
+    <div class="field"><label>Employee</label><select id="lv_emp">${emps.map(e=>`<option value="${e.id}">${esc(displayNameLFM(e))}</option>`).join('')}</select></div>
     <div class="field"><label>Year</label><input id="lv_year" type="number" value="${renderLeave._year||new Date().getFullYear()}"></div>
     <div class="field"><label>Entitled (days)</label><input id="lv_entitled" type="number" value="0"></div>
     <div class="field"><label>Used (days, this entry)</label><input id="lv_used" type="number" value="0"></div>
@@ -3070,7 +3186,7 @@ function renderCommissions(root){
       <div class="flexrow no-print">
         <select id="comm_emp_filter" title="Show only this employee's commissions">
           <option value="all" ${commFilterEmpId==='all'?'selected':''}>All Employees</option>
-          ${filterEmps.map(e=>`<option value="${e.id}" ${commFilterEmpId===e.id?'selected':''}>${esc(e.name)}</option>`).join('')}
+          ${filterEmps.map(e=>`<option value="${e.id}" ${commFilterEmpId===e.id?'selected':''}>${esc(displayNameLFM(e))}</option>`).join('')}
         </select>
         <select id="comm_year_filter" title="Show only this year">
           <option value="all" ${commFilterYear==='all'?'selected':''}>All Years</option>
@@ -3124,7 +3240,7 @@ function renderCommTable(){
 function addCommissionModal(){
   const emps = sortByName(activeEmployees());
   const body = `<div class="form-grid cols3">
-    <div class="field"><label>Employee</label><select id="cm_emp">${emps.map(e=>`<option value="${e.id}">${esc(e.name)}</option>`).join('')}</select></div>
+    <div class="field"><label>Employee</label><select id="cm_emp">${emps.map(e=>`<option value="${e.id}">${esc(displayNameLFM(e))}</option>`).join('')}</select></div>
     <div class="field"><label>Type</label><select id="cm_type" onchange="const w=document.getElementById('cm_run_wrap'); w.style.display = (this.value==='LIC'||this.value==='Production') ? '' : 'none';"><option>LIC</option><option>5JS</option><option>Production</option><option>Other</option></select></div>
     <div class="field"><label>Amount (₱)</label><input id="cm_amount" type="number" step="0.01" value="0"></div>
     <div class="field"><label>Date</label><input id="cm_date" type="date" value="${todayISO()}"></div>
@@ -3282,7 +3398,7 @@ function renderLoans(root){
       <div class="flexrow no-print">
         <select id="loanFilterSel" title="Show only this employee's loans & deductions">
           <option value="all" ${loanFilterEmpId==='all'?'selected':''}>All Employees</option>
-          ${filterEmps.map(e=>`<option value="${e.id}" ${loanFilterEmpId===e.id?'selected':''}>${esc(e.name)}</option>`).join('')}
+          ${filterEmps.map(e=>`<option value="${e.id}" ${loanFilterEmpId===e.id?'selected':''}>${esc(displayNameLFM(e))}</option>`).join('')}
         </select>
         <select id="loanFilterTypeSel" title="Show only this type of record">
           <option value="all" ${loanFilterType==='all'?'selected':''}>All Types</option>
@@ -3433,9 +3549,9 @@ function renderLoanTable(){
 // much, the per-payday deduction, and when it started/ends — instead of the full line-by-line ledger.
 function renderLoanSummaryTable(wrap, list){
   const episodes = computeLoanEpisodes(list).sort((a,b)=>{
-    const nameA = (empById(a.employeeId)||{}).name || '';
-    const nameB = (empById(b.employeeId)||{}).name || '';
-    return nameA.localeCompare(nameB) || String(b.startDate||'').localeCompare(String(a.startDate||''));
+    const empA = empById(a.employeeId), empB = empById(b.employeeId);
+    const nameA = empA ? empA.name : '', nameB = empB ? empB.name : '';
+    return surnameKeyForEmp(empA).localeCompare(surnameKeyForEmp(empB)) || nameA.localeCompare(nameB) || String(b.startDate||'').localeCompare(String(a.startDate||''));
   });
   wrap.innerHTML = `
   <div class="helpbox">One row per loan/cash advance granted — Amount is what was granted (or, marked "(est.)", the sum of its scheduled deductions when no grant amount is on file). Status: "Fully Deducted" once every scheduled deduction for it has actually been applied in payroll.</div>
@@ -3443,7 +3559,7 @@ function renderLoanSummaryTable(wrap, list){
   ${episodes.map(ep=>{
     const emp = empById(ep.employeeId);
     return `<tr>
-      <td>${esc(emp?emp.name:'(deleted)')}</td>
+      <td>${esc(emp?displayNameLFM(emp):'(deleted)')}</td>
       <td>${esc(ep.type)}</td>
       <td class="num">${peso(ep.amount)}${ep.impliedAmount ? ' <span class="muted" title="No original loan/grant amount on file for this one — shown instead as the sum of its scheduled deductions.">(est.)</span>' : ''}</td>
       <td class="num">${ep.installmentCount ? (ep.allSame ? peso(ep.perInstallment) : (ep.onlyLastDiffers ? `${peso(ep.perInstallment)} <span class="muted" title="The last scheduled deduction is smaller than the rest — it's just absorbing whatever's left of the balance, not a change in the regular deduction amount.">(last: ${peso(ep.lastAmount)})</span>` : 'varies')) : '—'}</td>
@@ -3465,7 +3581,7 @@ function addLoanModal(id){
   const emps = sortByName(activeEmployees());
   const types = ['Loan', 'Cash Advance', 'Pag-IBIG Loan', 'Repayment'];
   const body = `<div class="form-grid cols3">
-    <div class="field"><label>Employee</label><select id="ln_emp">${emps.map(e=>`<option value="${e.id}" ${l && l.employeeId===e.id?'selected':''}>${esc(e.name)}</option>`).join('')}</select></div>
+    <div class="field"><label>Employee</label><select id="ln_emp">${emps.map(e=>`<option value="${e.id}" ${l && l.employeeId===e.id?'selected':''}>${esc(displayNameLFM(e))}</option>`).join('')}</select></div>
     <div class="field"><label>Type</label><select id="ln_type">${types.map(t=>`<option ${l && l.type===t?'selected':''}>${t}</option>`).join('')}</select></div>
     <div class="field"><label>Date</label><input id="ln_date" type="date" value="${l ? esc(l.date) : todayISO()}"></div>
     <div class="field" style="grid-column:1/-1;"><label>Remarks</label><input id="ln_remarks" placeholder="e.g. emergency loan" value="${l ? esc(l.remarks) : ''}"></div>
@@ -3575,7 +3691,7 @@ function computeInstallmentSchedule(total, installment, firstDate, freq){
 function addInstallmentPlanModal(){
   const emps = sortByName(activeEmployees());
   const body = `<div class="form-grid cols3">
-    <div class="field"><label>Employee</label><select id="ip_emp">${emps.map(e=>`<option value="${e.id}">${esc(e.name)}</option>`).join('')}</select></div>
+    <div class="field"><label>Employee</label><select id="ip_emp">${emps.map(e=>`<option value="${e.id}">${esc(displayNameLFM(e))}</option>`).join('')}</select></div>
     <div class="field"><label>Type</label><select id="ip_type" onchange="onInstallmentTypeChange()"><option>Cash Advance</option><option>Loan</option><option>Pag-IBIG Loan</option></select></div>
     <div class="field"><label>Deduction Frequency</label><select id="ip_freq"><option value="everyPayday">Every Payday (4th &amp; 19th)</option><option value="monthly">Monthly Only (4th)</option></select></div>
     <div class="field"><label>Total Amount (₱)</label><input id="ip_total" type="number" step="0.01" value="0"></div>
@@ -3691,9 +3807,11 @@ function renderLateTable(){
     if(r.periodEnd < from || r.periodStart > to) return;
     r.entries.forEach(en=>{ totals[en.employeeId] = (totals[en.employeeId]||0) + num(en.lateMinutes); });
   });
-  const rows = Object.entries(totals).filter(([,m])=>m>0).sort((a,b)=>b[1]-a[1]);
+  // Ranked worst-to-best by total late minutes (the whole point of this report); employees tied on
+  // minutes are ordered by surname so the tie isn't arbitrary/insertion-order.
+  const rows = Object.entries(totals).filter(([,m])=>m>0).sort((a,b)=> b[1]-a[1] || surnameKeyForEmp(empById(a[0])).localeCompare(surnameKeyForEmp(empById(b[0]))));
   wrap.innerHTML = `<table class="sortable"><thead><tr><th>#</th><th>Employee</th><th class="num">Total Late Minutes</th></tr></thead><tbody>
-  ${rows.map(([id,m],i)=>{ const emp=empById(id); return `<tr><td>${i+1}</td><td>${esc(emp?emp.name:'(deleted)')}</td><td class="num">${m.toFixed(0)}</td></tr>`; }).join('')}
+  ${rows.map(([id,m],i)=>{ const emp=empById(id); return `<tr><td>${i+1}</td><td>${esc(emp?displayNameLFM(emp):'(deleted)')}</td><td class="num">${m.toFixed(0)}</td></tr>`; }).join('')}
   </tbody></table>${rows.length===0?'<div class="empty-state">No late records in this range.</div>':''}`;
 }
 function renderYtdReport(root){
@@ -3712,7 +3830,7 @@ function renderYtdTable(){
   const year = Number(document.getElementById('ytd_year').value);
   const totals = {};
   const ensure = (emp) => {
-    if(!totals[emp.id]) totals[emp.id] = {name:emp.name, deductions:0, takeHome:0, embeddedCommission:0, licCommission:0, fivejsCommission:0, productionCommission:0};
+    if(!totals[emp.id]) totals[emp.id] = {name:emp.name, lfm:displayNameLFM(emp), surnameKey:surnameKeyForEmp(emp), deductions:0, takeHome:0, embeddedCommission:0, licCommission:0, fivejsCommission:0, productionCommission:0};
     return totals[emp.id];
   };
   state.runs.forEach(r=>{
@@ -3748,10 +3866,10 @@ function renderYtdTable(){
     const payroll = (r.grossEarnings||0) - r.embeddedCommission;
     const earnings = payroll + r.licCommission + r.fivejsCommission + r.productionCommission;
     return {...r, payroll, earnings};
-  }).sort((a,b)=>b.takeHome-a.takeHome);
+  }).sort((a,b)=> a.surnameKey.localeCompare(b.surnameKey) || a.name.localeCompare(b.name));
   const grand = rows.reduce((a,r)=>({earnings:a.earnings+r.earnings, payroll:a.payroll+r.payroll, deductions:a.deductions+r.deductions, takeHome:a.takeHome+r.takeHome, licCommission:a.licCommission+r.licCommission, fivejsCommission:a.fivejsCommission+r.fivejsCommission, productionCommission:a.productionCommission+r.productionCommission}), {earnings:0,payroll:0,deductions:0,takeHome:0,licCommission:0,fivejsCommission:0,productionCommission:0});
   wrap.innerHTML = `<table class="sortable"><thead><tr><th>Employee</th><th class="num">YTD Payroll</th><th class="num">LIC Commission</th><th class="num">Production Commission</th><th class="num">5JS Commission</th><th class="num">Total Income</th><th class="num">Total Deductions</th><th class="num">Total Take-Home</th></tr></thead><tbody>
-  ${rows.map(r=>`<tr><td>${esc(r.name)}</td><td class="num">${peso(r.payroll)}</td><td class="num">${peso(r.licCommission)}</td><td class="num">${peso(r.productionCommission)}</td><td class="num">${peso(r.fivejsCommission)}</td><td class="num" style="font-weight:700;">${peso(r.earnings)}</td><td class="num">${peso(r.deductions)}</td><td class="num">${peso(r.takeHome)}</td></tr>`).join('')}
+  ${rows.map(r=>`<tr><td>${esc(r.lfm)}</td><td class="num">${peso(r.payroll)}</td><td class="num">${peso(r.licCommission)}</td><td class="num">${peso(r.productionCommission)}</td><td class="num">${peso(r.fivejsCommission)}</td><td class="num" style="font-weight:700;">${peso(r.earnings)}</td><td class="num">${peso(r.deductions)}</td><td class="num">${peso(r.takeHome)}</td></tr>`).join('')}
   </tbody><tfoot><tr style="font-weight:700;background:#fafbfc;"><td>GRAND TOTAL</td><td class="num">${peso(grand.payroll)}</td><td class="num">${peso(grand.licCommission)}</td><td class="num">${peso(grand.productionCommission)}</td><td class="num">${peso(grand.fivejsCommission)}</td><td class="num">${peso(grand.earnings)}</td><td class="num">${peso(grand.deductions)}</td><td class="num">${peso(grand.takeHome)}</td></tr></tfoot></table>
   ${rows.length===0?'<div class="empty-state">No payroll or commission data for this year yet.</div>':''}`;
 }
@@ -3788,15 +3906,23 @@ function computeAnnualTotals(year, month){
   // whenever an override applies; the caller is expected to disable the month picker for those years.
   const override = state.historicalAnnualTotals && state.historicalAnnualTotals[year];
   if(override){
-    return override.map(r => ({
-      fivejsCommission:0, licCommission:0, productionCommission:0, otherCommission:0,
-      holidayDays:0, incentiveLeave:0, adjustment:0, sss:0, philhealth:0, pagibig:0,
-      ...r
-    })).sort((a,b)=> a.name.localeCompare(b.name));
+    // Historical rows are flat name strings from the old Excel with no employeeId — try to match
+    // today's employee record by name so a migrated Last/First/Middle split (and its exact surname)
+    // carries over to old years too; otherwise fall back to the getSurname() guess on the raw string.
+    return override.map(r => {
+      const liveEmp = state.employees.find(e => normalizeNameForMatch(e.name) === normalizeNameForMatch(r.name));
+      return {
+        fivejsCommission:0, licCommission:0, productionCommission:0, otherCommission:0,
+        holidayDays:0, incentiveLeave:0, adjustment:0, sss:0, philhealth:0, pagibig:0,
+        ...r,
+        lfm: liveEmp ? displayNameLFM(liveEmp) : r.name,
+        surnameKey: liveEmp ? surnameKeyForEmp(liveEmp) : getSurname(r.name)
+      };
+    }).sort((a,b)=> a.surnameKey.localeCompare(b.surnameKey) || a.name.localeCompare(b.name));
   }
   const totals = {};
   const ensure = (emp) => {
-    if(!totals[emp.id]) totals[emp.id] = { name: emp.name,
+    if(!totals[emp.id]) totals[emp.id] = { name: emp.name, lfm:displayNameLFM(emp), surnameKey:surnameKeyForEmp(emp),
       basicSalary:0, restDayPay:0, otPay:0, holidayDays:0, holidayPay:0,
       fivejsCommission:0, licCommission:0, productionCommission:0, otherCommission:0,
       thirteenthMonth:0, allowance:0, incentiveLeave:0, adjustment:0,
@@ -3845,7 +3971,7 @@ function computeAnnualTotals(year, month){
     else if(type === 'PRODUCTION') t.productionCommission += num(cm.amount);
     else t.otherCommission += num(cm.amount);
   });
-  return Object.values(totals).sort((a,b)=> a.name.localeCompare(b.name));
+  return Object.values(totals).sort((a,b)=> a.surnameKey.localeCompare(b.surnameKey) || a.name.localeCompare(b.name));
 }
 function renderAnnualTable(){
   const wrap = document.getElementById('annWrap'); if(!wrap) return;
@@ -3869,7 +3995,7 @@ function renderAnnualTable(){
     <th class="num">Allowance</th><th class="num">Incentive Leave</th><th class="num">Adjustment</th>
     <th class="num">SSS</th><th class="num">PhilHealth</th><th class="num">Pag-IBIG</th>
   </tr></thead><tbody>
-  ${rows.map(r=>`<tr><td>${esc(r.name)}</td><td class="num">${peso(r.basicSalary)}</td><td class="num">${peso(r.restDayPay)}</td><td class="num">${peso(r.otPay)}</td>
+  ${rows.map(r=>`<tr><td>${esc(r.lfm)}</td><td class="num">${peso(r.basicSalary)}</td><td class="num">${peso(r.restDayPay)}</td><td class="num">${peso(r.otPay)}</td>
     <td class="num">${peso(r.holidayPay)}</td><td class="num">${peso(r.fivejsCommission)}</td><td class="num">${peso(r.licCommission)}</td>
     <td class="num">${peso(r.productionCommission)}</td><td class="num">${peso(r.otherCommission)}</td><td class="num">${peso(r.thirteenthMonth)}</td>
     <td class="num">${peso(r.allowance)}</td><td class="num">${peso(r.incentiveLeave)}</td><td class="num">${peso(r.adjustment)}</td>
@@ -3917,12 +4043,12 @@ function renderRunSummaryTable(){
   const run = state.runs.find(r=>r.id===document.getElementById('rs_run').value);
   if(!run) return;
   let e=0,d=0,t=0,adjTotal=0;
-  const rows = run.entries.map(en=>{ const emp=empById(en.employeeId); if(!emp) return ''; const c=calcEntry(emp,en,run); e+=c.totalEarnings; d+=c.totalDeductions; t+=c.takeHome; adjTotal += num(en.adjustment);
+  const rows = sortEntriesByName(run.entries).map(en=>{ const emp=empById(en.employeeId); if(!emp) return ''; const c=calcEntry(emp,en,run); e+=c.totalEarnings; d+=c.totalDeductions; t+=c.takeHome; adjTotal += num(en.adjustment);
     // Adjustment and its Reason are broken out here (even though Adjustment is already folded into
     // Earnings above) specifically so anything unusual about this run's pay — a correction, a
     // one-off bonus, a deduction for a prior overpayment, etc. — stays visible and explained
     // whenever this report is looked at later, instead of being an unexplained number.
-    return `<tr><td>${esc(emp.name)}</td><td class="num">${peso(c.totalEarnings)}</td><td class="num">${peso(c.totalDeductions)}</td>
+    return `<tr><td>${esc(displayNameLFM(emp))}</td><td class="num">${peso(c.totalEarnings)}</td><td class="num">${peso(c.totalDeductions)}</td>
       <td class="num" style="${num(en.adjustment)!==0?'font-weight:600;':''}">${num(en.adjustment)!==0 ? peso(en.adjustment) : '—'}</td>
       <td style="white-space:normal;min-width:160px;color:${en.adjustmentNote?'inherit':'#999'};">${esc(en.adjustmentNote || (num(en.adjustment)!==0 ? '(no reason noted)' : ''))}</td>
       <td class="num">${peso(c.takeHome)}</td></tr>`; }).join('');
@@ -3937,7 +4063,7 @@ function renderDeductionsReport(root){
   root.innerHTML = `<div class="section"><div class="section-head">
     <div><h3>Deductions Summary</h3><div class="desc">SSS, PhilHealth, Pag-IBIG and loan/other deductions actually withheld per employee — handy for government remittance filing.</div></div>
     <div class="flexrow no-print">
-      <select id="ded_emp"><option value="all">All Employees</option>${emps.map(e=>`<option value="${e.id}">${esc(e.name)}</option>`).join('')}</select>
+      <select id="ded_emp"><option value="all">All Employees</option>${emps.map(e=>`<option value="${e.id}">${esc(displayNameLFM(e))}</option>`).join('')}</select>
       <select id="ded_year">${(years.length?years:[year]).map(y=>`<option value="${y}">${y}</option>`).join('')}</select>
       <select id="ded_month"><option value="all">All Months</option>${MONTH_NAMES.map((m,i)=>`<option value="${i+1}">${m}</option>`).join('')}</select>
     </div>
@@ -3981,7 +4107,7 @@ function renderDeductionsTable(){
     });
     const grand = byMonth.reduce((a,m)=>{ Object.keys(a).forEach(k=>a[k]+=m[k]); return a; }, empty());
     wrap.innerHTML = `
-    <div class="helpbox">${esc(emp?emp.name:'(deleted)')} — ${year} monthly deduction breakdown</div>
+    <div class="helpbox">${esc(emp?displayNameLFM(emp):'(deleted)')} — ${year} monthly deduction breakdown</div>
     <table class="sortable"><thead><tr><th>Month</th><th class="num">Basic Salary</th><th class="num">SSS</th><th class="num">PhilHealth</th><th class="num">Pag-IBIG</th><th class="num">Loan</th><th class="num">Cash Adv.</th><th class="num">Other</th><th class="num">Late Ded.</th><th class="num">Undertime Ded.</th><th class="num">Total</th></tr></thead><tbody>
     ${MONTH_NAMES.map((mn,i)=>{ const m = byMonth[i]; return `<tr><td data-sort="${i}">${mn}</td><td class="num">${peso(m.basic)}</td><td class="num">${peso(m.sss)}</td><td class="num">${peso(m.philhealth)}</td><td class="num">${peso(m.pagibig)}</td><td class="num">${peso(m.loan)}</td><td class="num">${peso(m.cashAdvance)}</td><td class="num">${peso(m.other)}</td><td class="num">${peso(m.late)}</td><td class="num">${peso(m.undertime)}</td><td class="num" style="font-weight:700;">${peso(rowTotal(m))}</td></tr>`; }).join('')}
     </tbody><tfoot><tr style="font-weight:700;background:#fafbfc;"><td>YEAR TOTAL</td><td class="num">${peso(grand.basic)}</td><td class="num">${peso(grand.sss)}</td><td class="num">${peso(grand.philhealth)}</td><td class="num">${peso(grand.pagibig)}</td><td class="num">${peso(grand.loan)}</td><td class="num">${peso(grand.cashAdvance)}</td><td class="num">${peso(grand.other)}</td><td class="num">${peso(grand.late)}</td><td class="num">${peso(grand.undertime)}</td><td class="num">${peso(rowTotal(grand))}</td></tr></tfoot></table>`;
@@ -3990,7 +4116,7 @@ function renderDeductionsTable(){
 
   const totals = {};
   const ensure = (emp) => {
-    if(!totals[emp.id]) totals[emp.id] = {name:emp.name, ...empty()};
+    if(!totals[emp.id]) totals[emp.id] = {name:emp.name, lfm:displayNameLFM(emp), surnameKey:surnameKeyForEmp(emp), ...empty()};
     return totals[emp.id];
   };
   state.runs.forEach(r=>{
@@ -4004,13 +4130,13 @@ function renderDeductionsTable(){
       addInto(ensure(emp), c);
     });
   });
-  const rows = Object.values(totals).sort((a,b)=>a.name.localeCompare(b.name));
+  const rows = Object.values(totals).sort((a,b)=> a.surnameKey.localeCompare(b.surnameKey) || a.name.localeCompare(b.name));
   const grand = rows.reduce((a,r)=>{ Object.keys(empty()).forEach(k=>a[k]+=r[k]); return a; }, empty());
   const label = month===null ? `${year} (full year)` : `${MONTH_NAMES[month-1]} ${year}`;
   wrap.innerHTML = `
   <div class="helpbox">${label} — ${rows.length} employee${rows.length===1?'':'s'} with deductions</div>
   <table class="sortable"><thead><tr><th>Employee</th><th class="num">Basic Salary</th><th class="num">SSS</th><th class="num">PhilHealth</th><th class="num">Pag-IBIG</th><th class="num">Loan</th><th class="num">Cash Adv.</th><th class="num">Other</th><th class="num">Late Ded.</th><th class="num">Undertime Ded.</th><th class="num">Total</th></tr></thead><tbody>
-  ${rows.map(r=>`<tr><td>${esc(r.name)}</td><td class="num">${peso(r.basic)}</td><td class="num">${peso(r.sss)}</td><td class="num">${peso(r.philhealth)}</td><td class="num">${peso(r.pagibig)}</td><td class="num">${peso(r.loan)}</td><td class="num">${peso(r.cashAdvance)}</td><td class="num">${peso(r.other)}</td><td class="num">${peso(r.late)}</td><td class="num">${peso(r.undertime)}</td><td class="num" style="font-weight:700;">${peso(rowTotal(r))}</td></tr>`).join('')}
+  ${rows.map(r=>`<tr><td>${esc(r.lfm)}</td><td class="num">${peso(r.basic)}</td><td class="num">${peso(r.sss)}</td><td class="num">${peso(r.philhealth)}</td><td class="num">${peso(r.pagibig)}</td><td class="num">${peso(r.loan)}</td><td class="num">${peso(r.cashAdvance)}</td><td class="num">${peso(r.other)}</td><td class="num">${peso(r.late)}</td><td class="num">${peso(r.undertime)}</td><td class="num" style="font-weight:700;">${peso(rowTotal(r))}</td></tr>`).join('')}
   </tbody><tfoot><tr style="font-weight:700;background:#fafbfc;"><td>GRAND TOTAL</td><td class="num">${peso(grand.basic)}</td><td class="num">${peso(grand.sss)}</td><td class="num">${peso(grand.philhealth)}</td><td class="num">${peso(grand.pagibig)}</td><td class="num">${peso(grand.loan)}</td><td class="num">${peso(grand.cashAdvance)}</td><td class="num">${peso(grand.other)}</td><td class="num">${peso(grand.late)}</td><td class="num">${peso(grand.undertime)}</td><td class="num">${peso(rowTotal(grand))}</td></tr></tfoot></table>
   ${rows.length===0?'<div class="empty-state">No deductions recorded for this period.</div>':''}`;
 }
@@ -4022,7 +4148,7 @@ function renderTimesheetReport(root){
   root.innerHTML = `<div class="section"><div class="section-head">
     <div><h3>Time Sheet</h3><div class="desc">Every recorded daily time in/out for one employee, across all payroll periods in the selected range.</div></div>
     <div class="flexrow no-print">
-      <select id="tsr_emp">${emps.map(e=>`<option value="${e.id}">${esc(e.name)}</option>`).join('')}</select>
+      <select id="tsr_emp">${emps.map(e=>`<option value="${e.id}">${esc(displayNameLFM(e))}</option>`).join('')}</select>
       <input type="date" id="tsr_from" value="${defaultFrom}"><span>to</span><input type="date" id="tsr_to" value="${defaultTo}">
       <button class="btn" onclick="renderTimesheetReportTable()">Apply</button>
     </div>
@@ -4063,7 +4189,7 @@ function renderTimesheetReportTable(){
       <td class="num">${day.isRestDay ? day.hoursWorked.toFixed(2) : '—'}</td><td>${esc(day.remarks)}</td></tr>`;
   }).join('');
   wrap.innerHTML = `
-  <div class="helpbox">${esc(emp.name)} — ${daysWorked} day${daysWorked===1?'':'s'} worked, ${totalHours.toFixed(2)} regular hours, ${totalLate.toFixed(0)} late minutes, ${totalUndertime.toFixed(0)} undertime minutes, ${totalOt.toFixed(2)} OT hours, ${totalRestDay.toFixed(2)} rest day hours (${fmtDate(from)} – ${fmtDate(to)})</div>
+  <div class="helpbox">${esc(displayNameLFM(emp))} — ${daysWorked} day${daysWorked===1?'':'s'} worked, ${totalHours.toFixed(2)} regular hours, ${totalLate.toFixed(0)} late minutes, ${totalUndertime.toFixed(0)} undertime minutes, ${totalOt.toFixed(2)} OT hours, ${totalRestDay.toFixed(2)} rest day hours (${fmtDate(from)} – ${fmtDate(to)})</div>
   <table class="sortable"><thead><tr><th>Date</th><th>Time In</th><th>Lunch Out</th><th>Lunch In</th><th>Time Out</th><th class="num">Hrs Worked</th><th class="num">Late (min)</th><th class="num">Undertime (min)</th><th class="num">OT Hrs</th><th class="num">Rest Day Hrs</th><th>Remarks</th></tr></thead>
   <tbody>${rows}</tbody></table>
   ${days.length===0?'<div class="empty-state">No time sheet records for this employee in this date range.</div>':''}`;
