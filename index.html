@@ -997,7 +997,7 @@ function calcEntry(emp, entry, run){
   const totalDeductions = sss + philhealth + pagibig + lateDeduction + undertimeDeduction + loanDeduction + cashAdvanceDeduction + otherDeduction;
   const takeHome = totalEarnings - totalDeductions;
 
-  return { hourlyRate:hr, basicSalary, restDayPay, otPay, otApproved, holidayPay, incentiveLeaveDays, incentiveLeavePay, allowance, logCommission, totalEarnings,
+  return { hourlyRate:hr, rateDay, basicSalary, restDayPay, otPay, otApproved, holidayPay, incentiveLeaveDays, incentiveLeavePay, allowance, logCommission, totalEarnings,
     lateDeduction, undertimeDeduction, sss, philhealth, pagibig, loanDeduction, cashAdvanceDeduction, otherDeduction,
     totalDeductions, takeHome };
 }
@@ -1887,7 +1887,7 @@ function renderRunDetail(){
     shownCount++;
     totalEarnings += c.totalEarnings; totalDeductions += c.totalDeductions; totalTakeHome += c.takeHome;
     return `<tr data-emp="${emp.id}">
-      <td style="white-space:normal;min-width:150px;">${esc(emp.name)}<br><span class="muted" style="font-size:11px;">${esc(emp.position)} · ₱${emp.rateDay}/day</span><br><button class="btn btn-sm no-print" style="margin-top:4px;" onclick="openTimesheetModal('${emp.id}')" title="Enter daily time in/out for this pay period">🕐 Time Sheet</button></td>
+      <td style="white-space:normal;min-width:150px;">${esc(emp.name)}<br><span class="muted" style="font-size:11px;">${esc(emp.position)} · ${peso(c.rateDay)}/day</span><br><button class="btn btn-sm no-print" style="margin-top:4px;" onclick="openTimesheetModal('${emp.id}')" title="Enter daily time in/out for this pay period">🕐 Time Sheet</button></td>
       <td><input type="number" step="0.5" value="${en.hoursWorked}" onchange="updEntry('${emp.id}','hoursWorked',this.value)"></td>
       <td><input type="number" step="1" value="${en.lateMinutes}" onchange="updEntry('${emp.id}','lateMinutes',this.value)"></td>
       <td><input type="number" step="1" value="${en.undertimeMinutes||0}" onchange="updEntry('${emp.id}','undertimeMinutes',this.value)" title="Minutes left before Schedule To on a full-day attempt — deducted same as Late, per DOLE's actual-time-not-rendered rule."></td>
@@ -1901,7 +1901,7 @@ function renderRunDetail(){
       <td><input type="number" step="0.01" value="${en.commission}" onchange="updEntry('${emp.id}','commission',this.value)" title="Manual/ad hoc commission typed directly into this run"></td>
       <td class="num" title="From LIC/Production Commission Log entries linked to this Pay Period — manage the link from the Commissions tab.">${peso(c.logCommission)}</td>
       <td><input type="number" step="0.01" value="${en.thirteenthMonth}" onchange="updEntry('${emp.id}','thirteenthMonth',this.value)"></td>
-      <td><input type="number" step="0.5" value="${en.incentiveLeaveDays||0}" onchange="updEntry('${emp.id}','incentiveLeaveDays',this.value)" title="Days × ${peso(emp.rateDay)}/day = ${peso(c.incentiveLeavePay)}"></td>
+      <td><input type="number" step="0.5" value="${en.incentiveLeaveDays||0}" onchange="updEntry('${emp.id}','incentiveLeaveDays',this.value)" title="Days × ${peso(c.rateDay)}/day = ${peso(c.incentiveLeavePay)}"></td>
       <td><input type="number" step="0.01" placeholder="${emp.allowance}" value="${en.allowanceOverride}" onchange="updEntry('${emp.id}','allowanceOverride',this.value)"></td>
       <td>
         <input type="number" step="0.01" value="${en.adjustment}" onchange="updEntry('${emp.id}','adjustment',this.value)">
@@ -2676,7 +2676,7 @@ function renderEntryEditModal(empId){
       <select onchange="renderEntryEditModal(this.value)">${options}</select>
     </div>
     <div class="muted" style="font-size:11.5px;margin-bottom:10px;">Pick a name to switch — whatever you change is already saved into this payroll run as you go. ✓ = already has entries filled in.</div>
-    <div class="muted" style="font-size:12px;margin-bottom:14px;">${esc(emp.position)} · ₱${emp.rateDay}/day this period</div>
+    <div class="muted" style="font-size:12px;margin-bottom:14px;">${esc(emp.position)} · ${peso(c.rateDay)}/day this period</div>
 
     <div class="form-grid cols3" style="margin-bottom:14px;">
       <div class="field"><label>Hours Worked</label><input type="number" step="0.5" value="${en.hoursWorked}" onchange="updEntryModalField('${empId}','hoursWorked',this.value)"></div>
@@ -2690,7 +2690,7 @@ function renderEntryEditModal(empId){
       <div class="field"><label>Commission (manual)</label><input type="number" step="0.01" value="${en.commission}" onchange="updEntryModalField('${empId}','commission',this.value)"></div>
       <div class="field"><label>Log Commission (LIC/Prod, linked)</label><input value="${peso(c.logCommission)}" disabled title="Manage the link from the Commissions tab"></div>
       <div class="field"><label>13th Month</label><input type="number" step="0.01" value="${en.thirteenthMonth}" onchange="updEntryModalField('${empId}','thirteenthMonth',this.value)"></div>
-      <div class="field"><label>Incentive Leave (Days)</label><input type="number" step="0.5" value="${en.incentiveLeaveDays||0}" onchange="updEntryModalField('${empId}','incentiveLeaveDays',this.value)" title="Days × ${peso(emp.rateDay)}/day = ${peso(c.incentiveLeavePay)}"></div>
+      <div class="field"><label>Incentive Leave (Days)</label><input type="number" step="0.5" value="${en.incentiveLeaveDays||0}" onchange="updEntryModalField('${empId}','incentiveLeaveDays',this.value)" title="Days × ${peso(c.rateDay)}/day = ${peso(c.incentiveLeavePay)}"></div>
       <div class="field"><label>Allowance override</label><input type="number" step="0.01" placeholder="${emp.allowance}" value="${en.allowanceOverride}" onchange="updEntryModalField('${empId}','allowanceOverride',this.value)"></div>
     </div>
 
@@ -2760,7 +2760,7 @@ function exportRunCSV(){
     const emp = empById(en.employeeId); if(!emp) return;
     const c = calcEntry(emp, en, run);
     const allowance = c.allowance;
-    const row = [emp.name, emp.position, emp.rateDay, en.hoursWorked, en.lateMinutes, (en.undertimeMinutes||0), en.otHours, (en.otApproved===true?'Yes':'No'), en.restDayHours, en.holidayDays,
+    const row = [emp.name, emp.position, c.rateDay, en.hoursWorked, en.lateMinutes, (en.undertimeMinutes||0), en.otHours, (en.otApproved===true?'Yes':'No'), en.restDayHours, en.holidayDays,
       en.commission, c.logCommission.toFixed(2), en.thirteenthMonth, (en.incentiveLeaveDays||0), c.incentiveLeavePay.toFixed(2), allowance, en.adjustment, c.totalEarnings.toFixed(2),
       c.sss.toFixed(2), c.philhealth.toFixed(2), c.pagibig.toFixed(2), c.lateDeduction.toFixed(2), c.undertimeDeduction.toFixed(2), c.loanDeduction.toFixed(2),
       c.cashAdvanceDeduction.toFixed(2), c.otherDeduction.toFixed(2), c.totalDeductions.toFixed(2), c.takeHome.toFixed(2),
@@ -3103,7 +3103,7 @@ function payslipHtml(emp, en, run){
       <tr><td>Pay Day</td><td>${fmtDate(run.payDate)}</td></tr>
       <tr><td>Name</td><td>${esc(emp.name)}</td></tr>
       <tr><td>Position</td><td>${esc(emp.position)}</td></tr>
-      <tr><td>Rate</td><td>${peso(emp.rateDay)} /day</td></tr>
+      <tr><td>Rate</td><td>${peso(c.rateDay)} /day</td></tr>
       <tr><td>Total Days Worked</td><td>${daysWorked}</td></tr>
     </table>
     </div>
