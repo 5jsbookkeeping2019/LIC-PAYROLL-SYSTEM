@@ -40,6 +40,13 @@ input,select,textarea{font-family:inherit;font-size:13px;}
 /* Annual Report: freeze the header row so it stays visible while scrolling through all the
    employee rows — same sticky-header pattern used for the Payroll Run table and Time Sheet. */
 #annWrap{max-height:75vh;overflow-y:auto;}
+#thirteenthWrap table{border-collapse:separate;border-spacing:0;}
+#thirteenthWrap th:nth-child(1),#thirteenthWrap td:nth-child(1){position:sticky;left:0;min-width:230px;max-width:230px;background:#fff;z-index:3;}
+#thirteenthWrap th:nth-child(2),#thirteenthWrap td:nth-child(2){position:sticky;left:230px;min-width:190px;max-width:190px;background:#fff;z-index:3;box-shadow:1px 0 0 var(--line);}
+#thirteenthWrap thead th:nth-child(1),#thirteenthWrap thead th:nth-child(2){z-index:7;}
+#thirteenthWrap tbody tr:hover td:nth-child(1),#thirteenthWrap tbody tr:hover td:nth-child(2){background:#fafbfc;}
+#thirteenthWrap tfoot td:nth-child(1),#thirteenthWrap tfoot td:nth-child(2){background:#fafbfc;}
+#thirteenthWrap td select{width:100%;}
 #annWrap thead th{position:sticky;top:0;background:#fff;z-index:5;box-shadow:0 1px 0 var(--line);}
 a{color:var(--brand);}
 
@@ -4027,7 +4034,7 @@ function render13thMonthReport(root){
       <button class="btn" onclick="autoAssignThirteenthBatches()" title="Splits employees evenly across the paydays, alphabetically — then adjust any one in the Batch column">Auto-Assign Batches</button>
       <button class="btn" onclick="export13thMonthCSV()">⬇ Download Excel</button>
       <button class="btn" onclick="printReport()">🖨 Download PDF</button></div>
-  </div><div class="section-body"><div class="table-wrap"><table><thead><tr><th>Employee</th><th>Batch (Payday)</th>${months.map(m=>`<th class="num">${m.label}</th>`).join('')}<th class="num">Total</th><th class="num">13th Month (÷12)</th><th class="num">Paid So Far</th><th class="num">Balance</th></tr></thead><tbody>
+  </div><div class="section-body"><div class="table-wrap" id="thirteenthWrap"><table><thead><tr><th>Employee</th><th>Batch (Payday)</th>${months.map(m=>`<th class="num">${m.label}</th>`).join('')}<th class="num">Total</th><th class="num">13th Month (÷12)</th><th class="num">Paid So Far</th><th class="num">Balance</th></tr></thead><tbody>
   ${rows.map(r=>`<tr><td>${esc(displayNameLFM(r.emp))}${r.emp.active===false?' <span class="muted">(inactive)</span>':''}</td><td><select onchange="updThirteenthBatch('${r.empId}',this.value)"><option value="">— not assigned —</option>${sched.map((d,i)=>`<option value="${d}" ${plan.batches[r.empId]===d?'selected':''}>${fmtDate(d)}${i===sched.length-1?' (balance for all)':''}</option>`).join('')}</select></td>${months.map(m=>`<td class="num">${r.perMonth[m.key] ? peso(r.perMonth[m.key]) : '—'}</td>`).join('')}<td class="num">${peso(r.total)}</td><td class="num" style="font-weight:600;">${peso(r.thirteenth)}</td><td class="num">${peso(r.given)}</td><td class="num">${peso(r.balance)}</td></tr>`).join('')}
   </tbody><tfoot><tr style="font-weight:700;background:#fafbfc;"><td>TOTAL</td><td></td>${months.map(m=>`<td class="num">${peso(sum(r=>r.perMonth[m.key]))}</td>`).join('')}<td class="num">${peso(sum(r=>r.total))}</td><td class="num">${peso(sum(r=>r.thirteenth))}</td><td class="num">${peso(sum(r=>r.given))}</td><td class="num">${peso(sum(r=>r.balance))}</td></tr></tfoot></table></div>
   ${rows.length===0?'<div class="empty-state">No basic salary found in this December–November window.</div>':''}</div></div>`;
