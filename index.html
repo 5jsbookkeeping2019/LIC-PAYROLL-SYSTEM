@@ -1935,6 +1935,7 @@ function renderRunDetail(){
         <button class="btn" onclick="document.getElementById('attendanceFileInput').click()" title="Upload the biometric attendance Excel export for this period to auto-fill hours worked / late minutes">📥 Import Attendance (Excel)</button>
         <input type="file" id="attendanceFileInput" accept=".xlsx,.xls" style="display:none" onchange="if(this.files[0]) handleAttendanceFile(this.files[0]); this.value='';">
         ${isLastCutoffOfMonth(run) ? `<button class="btn" onclick="autoCalcStatutory('${run.id}')" title="Combines this cutoff's basic salary with the 1st–15th cutoff, looks up SSS from the bracket table, and carries forward PhilHealth/Pag-IBIG from the last payday">🧮 Auto-Calc SSS/PhilHealth/Pag-IBIG</button>` : ''}
+        ${(()=>{ const sched = thirteenthSchedule(getThirteenthPlan()), i = sched.indexOf(run.payDate); return i>=0 ? `<button class="btn" onclick="apply13thMonthToRun('${run.id}')" title="Fills in each employee's 13th Month for this payday (installment ${i+1} of ${sched.length}) from their Dec–Nov basic salary — see Reports → 13th Month">🎄 Apply 13th Month (${i+1} of ${sched.length})</button>` : ''; })()}
         <button class="btn" onclick="syncLoanDeductionsForRun('${run.id}')" title="Pulls in any Loan/Cash Advance amount actually scheduled for this exact Pay Date from Loans & Deductions. Never zeroes out an existing figure just because nothing is scheduled on this exact date — only fills in/updates when something is really due, so manually-typed amounts are always safe.">🔄 Sync Loan Deductions</button>
         <button class="btn" onclick="exportRunCSV()">⬇ Export CSV</button>
         <button class="btn" onclick="openDisbursementList('${run.id}')" title="A focused list of who to pay, how (GCash/Bank/Cash), the account number, and how much — for actually sending out this cutoff's salaries">💸 Disbursement List</button>
@@ -3906,6 +3907,111 @@ function saveInstallmentPlan(){
   toast(`Installment plan created: ${sched.length} deduction(s) of ${peso(installment)} scheduled.`);
 }
 
+/* ===================== 13TH MONTH ===================== */
+// Mirrors Jamie's own "13 MONTH PAY" workbook: for a given 13th-month year Y, the basis is the
+// BASIC SALARY ONLY (Hours Worked x Hourly Rate — no allowance, OT, rest day, holiday pay, commission
+// or adjustments, and before late/undertime deductions, same as the workbook) earned over the 12
+// months December (Y-1) through November (Y), added up, then divided by 12. Dec 1-15 + Dec 16-31 both
+// count as "December", and so on for each month. That total is then paid out split across the
+// plan's paydays (default: Oct 19, Nov 4, Nov 19, Dec 4), each one written into the run's own "13th
+// Month" field, which already flows into Total Earnings and the payslip. Each installment re-checks
+// how much is still owed (total so far minus what earlier paydays already gave) and divides THAT by
+// the number of installments left — so if more payroll runs get added later (Nov), or one payday was
+// adjusted by hand, the amounts self-correct, and the very last payday always pays whatever balance
+// remains (the same "balance" column as the workbook).
+function getThirteenthPlan(){
+  const p = state.settings.thirteenthPlan || {};
+  const year = Number(p.year) || new Date().getFullYear();
+  const n = Math.round(num(p.installments)) || 4;
+  return { year, firstPayDate: p.firstPayDate || `${year}-10-19`, installments: Math.min(Math.max(n,1),12) };
+}
+function thirteenthSchedule(plan){
+  const out = []; let d = plan.firstPayDate;
+  for(let i=0;i<plan.installments;i++){ out.push(d); d = stepPayday(d, 'everyPayday'); }
+  return out;
+}
+function thirteenthMonths(year){
+  const m = [{ y:year-1, m:12 }];
+  for(let i=1;i<=11;i++) m.push({ y:year, m:i });
+  return m.map(x=>({ ...x, key: `${x.y}-${String(x.m).padStart(2,'0')}`, label: `${MONTH_NAMES[x.m-1].slice(0,3)} ${String(x.y).slice(2)}` }));
+}
+// One row per employee: basic salary per month of the window, total, 13th month (total / 12), how
+// much earlier paydays already paid, and the balance. beforePayDate (optional) limits "already paid"
+// to paydays strictly before it — used when working out one specific payday's installment.
+function computeThirteenthRows(year, beforePayDate){
+  const months = thirteenthMonths(year);
+  const keys = new Set(months.map(m=>m.key));
+  const rows = [];
+  sortByName(state.employees).forEach(emp=>{
+    const perMonth = {}; months.forEach(m=>perMonth[m.key]=0);
+    let given = 0;
+    state.runs.forEach(r=>{
+      const en = r.entries.find(e=>e.employeeId===emp.id); if(!en) return;
+      const k = String(r.periodStart||'').slice(0,7);
+      if(keys.has(k)) perMonth[k] += calcEntry(emp, en, r).basicSalary;
+      const pd = String(r.payDate||'');
+      if(pd >= `${year}-09-01` && pd <= `${year}-12-31` && (!beforePayDate || pd < beforePayDate)) given += num(en.thirteenthMonth);
+    });
+    const total = months.reduce((a,m)=>a+perMonth[m.key],0);
+    if(total <= 0 && given <= 0) return;
+    const thirteenth = total/12;
+    rows.push({ empId: emp.id, emp, perMonth, total, thirteenth, given, balance: thirteenth - given });
+  });
+  return rows;
+}
+function apply13thMonthToRun(runId){
+  const run = state.runs.find(r=>r.id===runId); if(!run) return;
+  const plan = getThirteenthPlan(), sched = thirteenthSchedule(plan);
+  const idx = sched.indexOf(run.payDate);
+  if(idx < 0){ alert("This run's Pay Date isn't one of the 13th Month payout paydays. Check Reports → 13th Month for the schedule."); return; }
+  const left = sched.length - idx; // installments remaining, counting this one
+  const hasExisting = run.entries.some(en=>num(en.thirteenthMonth)>0);
+  if(!confirm(`Fill in the 13th Month for installment ${idx+1} of ${sched.length} (pay date ${fmtDate(run.payDate)}) for everyone in this run?${hasExisting ? "\n\nThis will OVERWRITE any 13th Month amounts already typed into this run." : ''}${left===1 ? "\n\nThis is the LAST installment — it pays each employee's full remaining balance." : ''}`)) return;
+  const byEmp = {}; computeThirteenthRows(plan.year, run.payDate).forEach(r=>byEmp[r.empId]=r);
+  let count = 0, total = 0;
+  run.entries.forEach(en=>{
+    const r = byEmp[en.employeeId];
+    const owed = r ? Math.max(0, r.thirteenth - r.given) : 0;
+    const amt = Math.round((left===1 ? owed : owed/left)*100)/100;
+    en.thirteenthMonth = amt; count++; total += amt;
+  });
+  markDirty(); renderRunDetail();
+  toast(`13th Month installment ${idx+1} of ${sched.length} filled in for ${count} employee${count===1?'':'s'} — ${peso(total)} total.`);
+}
+function updThirteenthPlan(field, val){
+  const plan = getThirteenthPlan();
+  if(field==='year'){ plan.year = Number(val); plan.firstPayDate = `${plan.year}-10-19`; }
+  else if(field==='installments') plan.installments = Number(val);
+  else if(field==='firstPayDate' && val) plan.firstPayDate = val;
+  state.settings.thirteenthPlan = plan;
+  markDirty();
+  const c = document.getElementById('content'); if(c) renderReports(c);
+}
+function render13thMonthReport(root){
+  const plan = getThirteenthPlan(), sched = thirteenthSchedule(plan), months = thirteenthMonths(plan.year);
+  const rows = computeThirteenthRows(plan.year);
+  const sum = f => rows.reduce((a,r)=>a+f(r),0);
+  const yearOpts = []; for(let y=new Date().getFullYear()-2; y<=new Date().getFullYear()+1; y++) yearOpts.push(y);
+  root.innerHTML = `<div class="section"><div class="section-head">
+    <div><h3>13th Month Pay</h3><div class="desc">Basic Salary only (Hours Worked × Hourly Rate — no allowance, OT, holiday, commission or adjustments), December ${plan.year-1} to November ${plan.year}, added up and divided by 12. Paid in ${sched.length} installment${sched.length===1?'':'s'}: ${sched.map(fmtDate).join(', ')}. Open each of those payroll runs and click <b>🎄 Apply 13th Month</b> to fill it in; the last one pays the remaining balance.</div></div>
+    <div class="flexrow no-print">
+      <label style="font-size:12px;">Year <select onchange="updThirteenthPlan('year',this.value)">${yearOpts.map(y=>`<option value="${y}" ${y===plan.year?'selected':''}>${y}</option>`).join('')}</select></label>
+      <label style="font-size:12px;">First payday <input type="date" value="${plan.firstPayDate}" onchange="updThirteenthPlan('firstPayDate',this.value)"></label>
+      <label style="font-size:12px;"># of installments <input type="number" min="1" max="12" step="1" value="${plan.installments}" style="width:60px;" onchange="updThirteenthPlan('installments',this.value)"></label>
+      <button class="btn" onclick="export13thMonthCSV()">⬇ Download Excel</button>
+      <button class="btn" onclick="printReport()">🖨 Download PDF</button></div>
+  </div><div class="section-body"><div class="table-wrap"><table><thead><tr><th>Employee</th>${months.map(m=>`<th class="num">${m.label}</th>`).join('')}<th class="num">Total</th><th class="num">13th Month (÷12)</th><th class="num">Paid So Far</th><th class="num">Balance</th></tr></thead><tbody>
+  ${rows.map(r=>`<tr><td>${esc(displayNameLFM(r.emp))}${r.emp.active===false?' <span class="muted">(inactive)</span>':''}</td>${months.map(m=>`<td class="num">${r.perMonth[m.key] ? peso(r.perMonth[m.key]) : '—'}</td>`).join('')}<td class="num">${peso(r.total)}</td><td class="num" style="font-weight:600;">${peso(r.thirteenth)}</td><td class="num">${peso(r.given)}</td><td class="num">${peso(r.balance)}</td></tr>`).join('')}
+  </tbody><tfoot><tr style="font-weight:700;background:#fafbfc;"><td>TOTAL</td>${months.map(m=>`<td class="num">${peso(sum(r=>r.perMonth[m.key]))}</td>`).join('')}<td class="num">${peso(sum(r=>r.total))}</td><td class="num">${peso(sum(r=>r.thirteenth))}</td><td class="num">${peso(sum(r=>r.given))}</td><td class="num">${peso(sum(r=>r.balance))}</td></tr></tfoot></table></div>
+  ${rows.length===0?'<div class="empty-state">No basic salary found in this December–November window.</div>':''}</div></div>`;
+}
+function export13thMonthCSV(){
+  const plan = getThirteenthPlan(), months = thirteenthMonths(plan.year), rows = computeThirteenthRows(plan.year);
+  exportRowsToCSV(`13th_Month_${plan.year}.csv`,
+    ['Employee', ...months.map(m=>m.label), 'Total', '13th Month (÷12)', 'Paid So Far', 'Balance'],
+    rows.map(r=>[displayNameLFM(r.emp), ...months.map(m=>r.perMonth[m.key].toFixed(2)), r.total.toFixed(2), r.thirteenth.toFixed(2), r.given.toFixed(2), r.balance.toFixed(2)]));
+}
+
 /* ===================== REPORTS ===================== */
 let reportTab = 'late';
 function renderReports(root){
@@ -3917,6 +4023,7 @@ function renderReports(root){
     <button class="subtab ${reportTab==='run'?'active':''}" data-t="run">Payroll Run Summary</button>
     <button class="subtab ${reportTab==='deductions'?'active':''}" data-t="deductions">Deductions Summary</button>
     <button class="subtab ${reportTab==='timesheet'?'active':''}" data-t="timesheet">Time Sheet</button>
+    <button class="subtab ${reportTab==='13th'?'active':''}" data-t="13th">13th Month</button>
   </div>
   <div id="reportBody"></div>`;
   root.querySelectorAll('.subtab').forEach(b=>b.addEventListener('click', ()=>{ reportTab=b.dataset.t; renderReports(root); }));
@@ -3926,6 +4033,7 @@ function renderReports(root){
   else if(reportTab==='annual') renderAnnualReport(body);
   else if(reportTab==='deductions') renderDeductionsReport(body);
   else if(reportTab==='timesheet') renderTimesheetReport(body);
+  else if(reportTab==='13th') render13thMonthReport(body);
   else renderRunSummaryReport(body);
 }
 function renderLateReport(root){
