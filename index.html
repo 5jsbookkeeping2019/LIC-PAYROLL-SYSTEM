@@ -1935,7 +1935,7 @@ function renderRunDetail(){
         <button class="btn" onclick="document.getElementById('attendanceFileInput').click()" title="Upload the biometric attendance Excel export for this period to auto-fill hours worked / late minutes">📥 Import Attendance (Excel)</button>
         <input type="file" id="attendanceFileInput" accept=".xlsx,.xls" style="display:none" onchange="if(this.files[0]) handleAttendanceFile(this.files[0]); this.value='';">
         ${isLastCutoffOfMonth(run) ? `<button class="btn" onclick="autoCalcStatutory('${run.id}')" title="Combines this cutoff's basic salary with the 1st–15th cutoff, looks up SSS from the bracket table, and carries forward PhilHealth/Pag-IBIG from the last payday">🧮 Auto-Calc SSS/PhilHealth/Pag-IBIG</button>` : ''}
-        ${(()=>{ const sched = thirteenthSchedule(getThirteenthPlan()), i = sched.indexOf(run.payDate); return i>=0 ? `<button class="btn" onclick="apply13thMonthToRun('${run.id}')" title="Fills in each employee's 13th Month for this payday (installment ${i+1} of ${sched.length}) from their Dec–Nov basic salary — see Reports → 13th Month">🎄 Apply 13th Month (${i+1} of ${sched.length})</button>` : ''; })()}
+        ${(()=>{ const sched = thirteenthSchedule(getThirteenthPlan()), i = sched.indexOf(run.payDate); return i>=0 ? `<button class="btn" onclick="apply13thMonthToRun('${run.id}')" title="Fills in each employee's 13th Month for this payday (${i===sched.length-1?'final payday — everyone\'s remaining balance':'only the employees assigned to this payday\'s batch'}) from their Dec–Nov basic salary — see Reports → 13th Month">🎄 Apply 13th Month${i===sched.length-1?' (balance)':' (batch)'}</button>` : ''; })()}
         <button class="btn" onclick="syncLoanDeductionsForRun('${run.id}')" title="Pulls in any Loan/Cash Advance amount actually scheduled for this exact Pay Date from Loans & Deductions. Never zeroes out an existing figure just because nothing is scheduled on this exact date — only fills in/updates when something is really due, so manually-typed amounts are always safe.">🔄 Sync Loan Deductions</button>
         <button class="btn" onclick="exportRunCSV()">⬇ Export CSV</button>
         <button class="btn" onclick="openDisbursementList('${run.id}')" title="A focused list of who to pay, how (GCash/Bank/Cash), the account number, and how much — for actually sending out this cutoff's salaries">💸 Disbursement List</button>
@@ -3923,7 +3923,7 @@ function getThirteenthPlan(){
   const p = state.settings.thirteenthPlan || {};
   const year = Number(p.year) || new Date().getFullYear();
   const n = Math.round(num(p.installments)) || 4;
-  return { year, firstPayDate: p.firstPayDate || `${year}-10-19`, installments: Math.min(Math.max(n,1),12) };
+  return { year, firstPayDate: p.firstPayDate || `${year}-10-19`, installments: Math.min(Math.max(n,1),12), batches: p.batches || {} };
 }
 function thirteenthSchedule(plan){
   const out = []; let d = plan.firstPayDate;
@@ -3964,19 +3964,45 @@ function apply13thMonthToRun(runId){
   const plan = getThirteenthPlan(), sched = thirteenthSchedule(plan);
   const idx = sched.indexOf(run.payDate);
   if(idx < 0){ alert("This run's Pay Date isn't one of the 13th Month payout paydays. Check Reports → 13th Month for the schedule."); return; }
-  const left = sched.length - idx; // installments remaining, counting this one
-  const hasExisting = run.entries.some(en=>num(en.thirteenthMonth)>0);
-  if(!confirm(`Fill in the 13th Month for installment ${idx+1} of ${sched.length} (pay date ${fmtDate(run.payDate)}) for everyone in this run?${hasExisting ? "\n\nThis will OVERWRITE any 13th Month amounts already typed into this run." : ''}${left===1 ? "\n\nThis is the LAST installment — it pays each employee's full remaining balance." : ''}`)) return;
+  const isFinal = idx === sched.length-1;
+  const batch = plan.batches || {};
   const byEmp = {}; computeThirteenthRows(plan.year, run.payDate).forEach(r=>byEmp[r.empId]=r);
-  let count = 0, total = 0;
-  run.entries.forEach(en=>{
+  // Each employee is paid on just ONE payday (their batch). Whatever the basic salary to date didn't
+  // yet cover (the not-yet-processed Oct/Nov cutoffs) is paid as a balance on the final payday, which
+  // covers everyone, so it also catches anyone never put in a batch.
+  const targets = run.entries.filter(en => isFinal || batch[en.employeeId] === run.payDate);
+  if(!targets.length){ alert("Nobody is assigned to this payday's batch. Assign employees under Reports → 13th Month (Batch column), or use Auto-Assign Batches."); return; }
+  const hasExisting = targets.some(en=>num(en.thirteenthMonth)>0);
+  if(!confirm(`Fill in the 13th Month for ${targets.length} employee${targets.length===1?'':'s'} in ${isFinal ? 'the FINAL payday (everyone\'s remaining balance)' : 'this payday\'s batch'} (${fmtDate(run.payDate)})?${hasExisting ? "\n\nThis will OVERWRITE 13th Month amounts already typed in for them." : ''}`)) return;
+  let total = 0;
+  targets.forEach(en=>{
     const r = byEmp[en.employeeId];
-    const owed = r ? Math.max(0, r.thirteenth - r.given) : 0;
-    const amt = Math.round((left===1 ? owed : owed/left)*100)/100;
-    en.thirteenthMonth = amt; count++; total += amt;
+    const amt = Math.round((r ? Math.max(0, r.thirteenth - r.given) : 0)*100)/100;
+    en.thirteenthMonth = amt; total += amt;
   });
   markDirty(); renderRunDetail();
-  toast(`13th Month installment ${idx+1} of ${sched.length} filled in for ${count} employee${count===1?'':'s'} — ${peso(total)} total.`);
+  toast(`13th Month filled in for ${targets.length} employee${targets.length===1?'':'s'} — ${peso(total)} total.`);
+}
+function updThirteenthBatch(empId, payDate){
+  const plan = getThirteenthPlan();
+  plan.batches = { ...(plan.batches||{}) };
+  if(payDate) plan.batches[empId] = payDate; else delete plan.batches[empId];
+  state.settings.thirteenthPlan = plan;
+  markDirty();
+  const c = document.getElementById('content'); if(c) renderReports(c);
+}
+// Splits everyone in the report evenly (alphabetical by surname, in order) across the plan's paydays.
+function autoAssignThirteenthBatches(){
+  const plan = getThirteenthPlan(), sched = thirteenthSchedule(plan);
+  const rows = computeThirteenthRows(plan.year).filter(r=>r.emp.active!==false);
+  if(!rows.length) return;
+  if(Object.keys(plan.batches||{}).length && !confirm("This replaces the batches you've already assigned. Continue?")) return;
+  const size = Math.ceil(rows.length / sched.length);
+  plan.batches = {};
+  rows.forEach((r,i)=>{ plan.batches[r.empId] = sched[Math.min(Math.floor(i/size), sched.length-1)]; });
+  state.settings.thirteenthPlan = plan;
+  markDirty();
+  const c = document.getElementById('content'); if(c) renderReports(c);
 }
 function updThirteenthPlan(field, val){
   const plan = getThirteenthPlan();
@@ -3993,23 +4019,24 @@ function render13thMonthReport(root){
   const sum = f => rows.reduce((a,r)=>a+f(r),0);
   const yearOpts = []; for(let y=new Date().getFullYear()-2; y<=new Date().getFullYear()+1; y++) yearOpts.push(y);
   root.innerHTML = `<div class="section"><div class="section-head">
-    <div><h3>13th Month Pay</h3><div class="desc">Basic Salary only (Hours Worked × Hourly Rate — no allowance, OT, holiday, commission or adjustments), December ${plan.year-1} to November ${plan.year}, added up and divided by 12. Paid in ${sched.length} installment${sched.length===1?'':'s'}: ${sched.map(fmtDate).join(', ')}. Open each of those payroll runs and click <b>🎄 Apply 13th Month</b> to fill it in; the last one pays the remaining balance.</div></div>
+    <div><h3>13th Month Pay</h3><div class="desc">Basic Salary only (Hours Worked × Hourly Rate — no allowance, OT, holiday, commission or adjustments), December ${plan.year-1} to November ${plan.year}, added up and divided by 12. Employees are paid by <b>batch</b> — each one on just one payday (pick it in the Batch column): ${sched.map(fmtDate).join(', ')}. The final payday (${fmtDate(sched[sched.length-1])}) pays everyone's remaining balance, including the Oct/Nov basic salary that wasn't in yet. Open each of those payroll runs and click <b>🎄 Apply 13th Month</b>.</div></div>
     <div class="flexrow no-print">
       <label style="font-size:12px;">Year <select onchange="updThirteenthPlan('year',this.value)">${yearOpts.map(y=>`<option value="${y}" ${y===plan.year?'selected':''}>${y}</option>`).join('')}</select></label>
       <label style="font-size:12px;">First payday <input type="date" value="${plan.firstPayDate}" onchange="updThirteenthPlan('firstPayDate',this.value)"></label>
-      <label style="font-size:12px;"># of installments <input type="number" min="1" max="12" step="1" value="${plan.installments}" style="width:60px;" onchange="updThirteenthPlan('installments',this.value)"></label>
+      <label style="font-size:12px;"># of paydays <input type="number" min="1" max="12" step="1" value="${plan.installments}" style="width:60px;" onchange="updThirteenthPlan('installments',this.value)"></label>
+      <button class="btn" onclick="autoAssignThirteenthBatches()" title="Splits employees evenly across the paydays, alphabetically — then adjust any one in the Batch column">Auto-Assign Batches</button>
       <button class="btn" onclick="export13thMonthCSV()">⬇ Download Excel</button>
       <button class="btn" onclick="printReport()">🖨 Download PDF</button></div>
-  </div><div class="section-body"><div class="table-wrap"><table><thead><tr><th>Employee</th>${months.map(m=>`<th class="num">${m.label}</th>`).join('')}<th class="num">Total</th><th class="num">13th Month (÷12)</th><th class="num">Paid So Far</th><th class="num">Balance</th></tr></thead><tbody>
-  ${rows.map(r=>`<tr><td>${esc(displayNameLFM(r.emp))}${r.emp.active===false?' <span class="muted">(inactive)</span>':''}</td>${months.map(m=>`<td class="num">${r.perMonth[m.key] ? peso(r.perMonth[m.key]) : '—'}</td>`).join('')}<td class="num">${peso(r.total)}</td><td class="num" style="font-weight:600;">${peso(r.thirteenth)}</td><td class="num">${peso(r.given)}</td><td class="num">${peso(r.balance)}</td></tr>`).join('')}
-  </tbody><tfoot><tr style="font-weight:700;background:#fafbfc;"><td>TOTAL</td>${months.map(m=>`<td class="num">${peso(sum(r=>r.perMonth[m.key]))}</td>`).join('')}<td class="num">${peso(sum(r=>r.total))}</td><td class="num">${peso(sum(r=>r.thirteenth))}</td><td class="num">${peso(sum(r=>r.given))}</td><td class="num">${peso(sum(r=>r.balance))}</td></tr></tfoot></table></div>
+  </div><div class="section-body"><div class="table-wrap"><table><thead><tr><th>Employee</th><th>Batch (Payday)</th>${months.map(m=>`<th class="num">${m.label}</th>`).join('')}<th class="num">Total</th><th class="num">13th Month (÷12)</th><th class="num">Paid So Far</th><th class="num">Balance</th></tr></thead><tbody>
+  ${rows.map(r=>`<tr><td>${esc(displayNameLFM(r.emp))}${r.emp.active===false?' <span class="muted">(inactive)</span>':''}</td><td><select onchange="updThirteenthBatch('${r.empId}',this.value)"><option value="">— not assigned —</option>${sched.map((d,i)=>`<option value="${d}" ${plan.batches[r.empId]===d?'selected':''}>${fmtDate(d)}${i===sched.length-1?' (balance for all)':''}</option>`).join('')}</select></td>${months.map(m=>`<td class="num">${r.perMonth[m.key] ? peso(r.perMonth[m.key]) : '—'}</td>`).join('')}<td class="num">${peso(r.total)}</td><td class="num" style="font-weight:600;">${peso(r.thirteenth)}</td><td class="num">${peso(r.given)}</td><td class="num">${peso(r.balance)}</td></tr>`).join('')}
+  </tbody><tfoot><tr style="font-weight:700;background:#fafbfc;"><td>TOTAL</td><td></td>${months.map(m=>`<td class="num">${peso(sum(r=>r.perMonth[m.key]))}</td>`).join('')}<td class="num">${peso(sum(r=>r.total))}</td><td class="num">${peso(sum(r=>r.thirteenth))}</td><td class="num">${peso(sum(r=>r.given))}</td><td class="num">${peso(sum(r=>r.balance))}</td></tr></tfoot></table></div>
   ${rows.length===0?'<div class="empty-state">No basic salary found in this December–November window.</div>':''}</div></div>`;
 }
 function export13thMonthCSV(){
   const plan = getThirteenthPlan(), months = thirteenthMonths(plan.year), rows = computeThirteenthRows(plan.year);
   exportRowsToCSV(`13th_Month_${plan.year}.csv`,
-    ['Employee', ...months.map(m=>m.label), 'Total', '13th Month (÷12)', 'Paid So Far', 'Balance'],
-    rows.map(r=>[displayNameLFM(r.emp), ...months.map(m=>r.perMonth[m.key].toFixed(2)), r.total.toFixed(2), r.thirteenth.toFixed(2), r.given.toFixed(2), r.balance.toFixed(2)]));
+    ['Employee', 'Batch (Payday)', ...months.map(m=>m.label), 'Total', '13th Month (÷12)', 'Paid So Far', 'Balance'],
+    rows.map(r=>[displayNameLFM(r.emp), plan.batches[r.empId]||'', ...months.map(m=>r.perMonth[m.key].toFixed(2)), r.total.toFixed(2), r.thirteenth.toFixed(2), r.given.toFixed(2), r.balance.toFixed(2)]));
 }
 
 /* ===================== REPORTS ===================== */
