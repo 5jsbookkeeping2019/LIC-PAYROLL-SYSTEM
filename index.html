@@ -382,7 +382,7 @@ function updateSaveBtn(){
 // technically sophisticated person could bypass the UI via browser dev tools — but Layer 1
 // means nothing they do that way could actually be saved to the shared cloud data.
 let currentUserRole = 'admin'; // 'admin' | 'hr'
-const HR_WRITE_PREFIXES = ['save','del','add','edit','toggle','apply','sync','migrate','transfer','reset','confirm','remove','mark','create','upd','auto','new','wageIncrease'];
+const HR_WRITE_PREFIXES = ['save','del','add','edit','toggle','apply','sync','migrate','transfer','reset','confirm','remove','mark','create','upd','auto','new','wageIncrease','fix'];
 const HR_WRITE_EXCEPTIONS = ['openEntryEditModal','openTimesheetModal','openTimesheetPicker','runTransferHistory','setCommissionRun'];
 const HR_WRITE_ALLOW = ['saveData']; // matches a write-prefix but is actually read-only (downloads a backup file)
 function hrExtractFnNames(attrVal){
@@ -1819,6 +1819,30 @@ function autoCalcStatutory(runId){
   markDirty(); renderRunDetail();
   toast(`Auto-calculated SSS/PhilHealth/Pag-IBIG for ${count} employee${count===1?'':'s'} — skipped a deduction wherever there's no number on file or it's marked "Don't deduct".`);
 }
+// Recomputes ONLY the SSS amount (not PhilHealth/Pag-IBIG, not anything else) for a month's last cutoff run, from
+// that month's combined Basic Salary (1st–15th + 16th–end) vs the SSS bracket table — the same lookup Auto-Calc
+// uses — and shows exactly who would change (old -> new) before touching anything.
+function fixSssForRun(runId){
+  const run = state.runs.find(r=>r.id===runId); if(!run) return;
+  if(!isLastCutoffOfMonth(run)){ alert("SSS is only set on the 16th–end-of-month run."); return; }
+  const sibling = findSiblingFirstCutoffRun(run);
+  const changes = [];
+  run.entries.forEach(en=>{
+    const emp = empById(en.employeeId);
+    if(!emp || !eligibleForStatutory(emp,'sss') || en.applyStatutory === false) return;
+    let basic = calcEntry(emp, en, run).basicSalary;
+    if(sibling){ const se = sibling.entries.find(x=>x.employeeId===emp.id); if(se) basic += calcEntry(emp, se, sibling).basicSalary; }
+    const exp = sssLookup(basic);
+    if(Math.abs(exp - num(en.sss)) > 0.5) changes.push({ en, emp, basic, old: num(en.sss), exp });
+  });
+  if(!changes.length){ toast("Every SSS amount in this run already matches the bracket."); return; }
+  changes.sort((a,b)=> surnameKeyForEmp(a.emp).localeCompare(surnameKeyForEmp(b.emp)));
+  const list = changes.map(c=>`${displayNameLFM(c.emp)}: ${peso(c.old)} → ${peso(c.exp)}  (month basic ${peso(c.basic)})`).join('\n');
+  if(!confirm(`Update SSS for ${changes.length} employee${changes.length===1?'':'s'} to match the bracket? Only SSS changes — PhilHealth, Pag-IBIG and everything else are left alone.\n\n${list}`)) return;
+  changes.forEach(c=>{ c.en.sss = c.exp; });
+  markDirty(); renderRunDetail();
+  toast(`SSS updated for ${changes.length} employee${changes.length===1?'':'s'}.`);
+}
 function createRun(){
   const start = document.getElementById('np_start').value;
   const end = document.getElementById('np_end').value;
@@ -1886,10 +1910,23 @@ function renderRunDetail(){
   if(!run || !holder) return;
   let totalEarnings=0, totalDeductions=0, totalTakeHome=0, shownCount=0;
   const totalCount = run.entries.length;
+  // SSS staleness check (16th–end runs only): Auto-Calc is a snapshot of the hours at the moment it was
+  // clicked, so if hours/late/etc. were edited afterwards the stored SSS can drift from the bracket.
+  const sssSibling = isLastCutoffOfMonth(run) ? findSiblingFirstCutoffRun(run) : null;
+  const sssExpectedFor = (emp, en)=>{
+    if(!isLastCutoffOfMonth(run) || en.applyStatutory === false || !eligibleForStatutory(emp,'sss')) return null;
+    let basic = calcEntry(emp, en, run).basicSalary;
+    if(sssSibling){ const se = sssSibling.entries.find(x=>x.employeeId===emp.id); if(se) basic += calcEntry(emp, se, sssSibling).basicSalary; }
+    return { exp: sssLookup(basic), basic };
+  };
+  let sssOffCount = 0;
   const rows = sortEntriesByName(run.entries).map(en=>{
     const emp = empById(en.employeeId);
     if(!emp) return '';
     const c = calcEntry(emp, en, run);
+    const sssChk = sssExpectedFor(emp, en);
+    const sssIsOff = !!sssChk && Math.abs(sssChk.exp - num(en.sss)) > 0.5;
+    if(sssIsOff) sssOffCount++;
     if(!runFilterMatch(en, c, runFilter)) return '';
     shownCount++;
     totalEarnings += c.totalEarnings; totalDeductions += c.totalDeductions; totalTakeHome += c.takeHome;
@@ -1916,7 +1953,7 @@ function renderRunDetail(){
       </td>
       <td class="num" style="font-weight:600;">${peso(c.totalEarnings)}</td>
       <td><label class="checkline"><input type="checkbox" ${en.applyStatutory!==false?'checked':''} onchange="updEntry('${emp.id}','applyStatutory',this.checked)"></label></td>
-      <td><input type="number" step="0.01" value="${en.sss}" onchange="updEntry('${emp.id}','sss',this.value)" title="${eligibleForStatutory(emp,'sss') ? '' : (emp.sssNo ? 'Marked \"Don\'t deduct\" on this employee\'s record' : 'No SSS No. on file for this employee')}" style="${eligibleForStatutory(emp,'sss')?'':'background:#fff8e6;'}"></td>
+      <td><input type="number" step="0.01" value="${en.sss}" onchange="updEntry('${emp.id}','sss',this.value)" title="${sssIsOff ? ('Hindi tugma sa SSS bracket — dapat ' + peso(sssChk.exp) + ' (month basic ' + peso(sssChk.basic) + '). Pindutin ang 🛠 Fix SSS to Bracket.') : (eligibleForStatutory(emp,'sss') ? '' : (emp.sssNo ? 'Marked \"Don\'t deduct\" on this employee\'s record' : 'No SSS No. on file for this employee'))}" style="${sssIsOff?'background:#fde8e8;border-color:#d33;color:#b00;font-weight:700;':(eligibleForStatutory(emp,'sss')?'':'background:#fff8e6;')}">${sssIsOff?`<div style="font-size:10px;color:#b00;white-space:nowrap;">dapat ${peso(sssChk.exp)}</div>`:''}</td>
       <td><input type="number" step="0.01" value="${en.philhealth}" onchange="updEntry('${emp.id}','philhealth',this.value)" title="${eligibleForStatutory(emp,'philhealth') ? '' : (emp.philhealthNo ? 'Marked \"Don\'t deduct\" on this employee\'s record' : 'No PhilHealth No. on file for this employee')}" style="${eligibleForStatutory(emp,'philhealth')?'':'background:#fff8e6;'}"></td>
       <td><input type="number" step="0.01" value="${en.pagibig}" onchange="updEntry('${emp.id}','pagibig',this.value)" title="${eligibleForStatutory(emp,'pagibig') ? '' : (emp.pagibigNo ? 'Marked \"Don\'t deduct\" on this employee\'s record' : 'No Pag-IBIG No. on file for this employee')}" style="${eligibleForStatutory(emp,'pagibig')?'':'background:#fff8e6;'}"></td>
       <td class="num">${peso(c.lateDeduction)}</td>
@@ -1943,6 +1980,7 @@ function renderRunDetail(){
         <input type="file" id="attendanceFileInput" accept=".xlsx,.xls" style="display:none" onchange="if(this.files[0]) handleAttendanceFile(this.files[0]); this.value='';">
         ${isLastCutoffOfMonth(run) ? `<button class="btn" onclick="autoCalcStatutory('${run.id}')" title="Combines this cutoff's basic salary with the 1st–15th cutoff, looks up SSS from the bracket table, and carries forward PhilHealth/Pag-IBIG from the last payday">🧮 Auto-Calc SSS/PhilHealth/Pag-IBIG</button>` : ''}
         ${(()=>{ const sched = thirteenthSchedule(getThirteenthPlan()), i = sched.indexOf(run.payDate); return i>=0 ? `<button class="btn" onclick="apply13thMonthToRun('${run.id}')" title="Fills in each employee's 13th Month for this payday (${i===sched.length-1?'final payday — everyone\'s remaining balance':'only the employees assigned to this payday\'s batch'}) from their Dec–Nov basic salary — see Reports → 13th Month">🎄 Apply 13th Month${i===sched.length-1?' (balance)':' (batch)'}</button> <button class="btn" onclick="reset13thMonthForRun('${run.id}')" title="Sets every employee's 13th Month in this run back to ₱0">Clear 13th Month</button>` : ''; })()}
+        ${isLastCutoffOfMonth(run) ? `<button class="btn" onclick="fixSssForRun('${run.id}')" title="Recomputes ONLY the SSS amount from this month's combined Basic Salary vs the SSS bracket, and shows who changes before applying. Leaves PhilHealth/Pag-IBIG alone.">🛠 Fix SSS to Bracket</button>` : ''}
         <button class="btn" onclick="syncLoanDeductionsForRun('${run.id}')" title="Pulls in any Loan/Cash Advance amount actually scheduled for this exact Pay Date from Loans & Deductions. Never zeroes out an existing figure just because nothing is scheduled on this exact date — only fills in/updates when something is really due, so manually-typed amounts are always safe.">🔄 Sync Loan Deductions</button>
         <button class="btn" onclick="exportRunCSV()">⬇ Export CSV</button>
         <button class="btn" onclick="openDisbursementList('${run.id}')" title="A focused list of who to pay, how (GCash/Bank/Cash), the account number, and how much — for actually sending out this cutoff's salaries">💸 Disbursement List</button>
@@ -1950,6 +1988,7 @@ function renderRunDetail(){
       </div>
     </div>
     <div class="section-body">
+      ${sssOffCount ? `<div class="helpbox no-print" style="margin-bottom:10px;background:#fff1e0;border-color:#f0a04b;color:#7a3e00;">⚠ <b>${sssOffCount} employee${sssOffCount===1?'':'s'}</b> ang SSS ay hindi tugma sa bracket (naka-red sa SSS column, may "dapat ₱…"). Madalas dahil may nabago sa hours/late pagkatapos pindutin ang Auto-Calc. <button class="btn btn-sm" onclick="fixSssForRun('${run.id}')">🛠 Fix SSS to Bracket</button></div>` : ''}
       <div class="flexrow no-print" style="margin-bottom:10px;align-items:center;">
         <label style="font-size:12.5px;font-weight:600;" for="runFilterSelect">Filter:</label>
         <select id="runFilterSelect" onchange="setRunFilter(this.value)">
@@ -4478,10 +4517,16 @@ function renderDeductionsTable(){
   const rows = Object.values(totals).sort((a,b)=> a.surnameKey.localeCompare(b.surnameKey) || a.name.localeCompare(b.name));
   const grand = rows.reduce((a,r)=>{ Object.keys(empty()).forEach(k=>a[k]+=r[k]); return a; }, empty());
   const label = month===null ? `${year} (full year)` : `${MONTH_NAMES[month-1]} ${year}`;
+  // When a single month is selected, flag any SSS withheld that doesn't match the SSS bracket for that
+  // month's combined Basic Salary (the same figure Auto-Calc uses). Informational only — nothing is changed.
+  const sssExpected = r => (month!==null && r.sss>0) ? sssLookup(r.basic) : null;
+  const sssOff = r => { const e = sssExpected(r); return e!==null && Math.abs(e - r.sss) > 0.5; };
+  const offCount = rows.filter(sssOff).length;
   wrap.innerHTML = `
   <div class="helpbox">${label} — ${rows.length} employee${rows.length===1?'':'s'} with deductions</div>
+  ${offCount ? `<div class="helpbox" style="background:#fff4e5;border-color:#f0b429;">⚠ ${offCount} employee${offCount===1?'':'s'} below ${offCount===1?'has':'have'} an SSS amount that doesn't match the SSS bracket for ${esc(label)}'s total Basic Salary (shown in red, with what the bracket says). The SSS figure here is whatever is on their payroll entries — if hours/basic salary were edited after Auto-Calc was run, or the amount was carried over from an earlier run, it stays out of date until Auto-Calc is run again on the 16–end run.</div>` : ''}
   <table class="sortable"><thead><tr><th>Employee</th><th class="num">Basic Salary</th><th class="num">SSS</th><th class="num">PhilHealth</th><th class="num">Pag-IBIG</th><th class="num">Loan</th><th class="num">Cash Adv.</th><th class="num">Other</th><th class="num">Late Ded.</th><th class="num">Undertime Ded.</th><th class="num">Total</th></tr></thead><tbody>
-  ${rows.map(r=>`<tr><td>${esc(r.lfm)}</td><td class="num">${peso(r.basic)}</td><td class="num">${peso(r.sss)}</td><td class="num">${peso(r.philhealth)}</td><td class="num">${peso(r.pagibig)}</td><td class="num">${peso(r.loan)}</td><td class="num">${peso(r.cashAdvance)}</td><td class="num">${peso(r.other)}</td><td class="num">${peso(r.late)}</td><td class="num">${peso(r.undertime)}</td><td class="num" style="font-weight:700;">${peso(rowTotal(r))}</td></tr>`).join('')}
+  ${rows.map(r=>`<tr><td>${esc(r.lfm)}</td><td class="num">${peso(r.basic)}</td><td class="num"${sssOff(r)?` style="color:#b42318;font-weight:700;" title="Bracket for this month's Basic Salary: ${peso(sssExpected(r))}"`:''}>${peso(r.sss)}${sssOff(r)?`<div style="font-size:10.5px;font-weight:600;">bracket: ${peso(sssExpected(r))}</div>`:''}</td><td class="num">${peso(r.philhealth)}</td><td class="num">${peso(r.pagibig)}</td><td class="num">${peso(r.loan)}</td><td class="num">${peso(r.cashAdvance)}</td><td class="num">${peso(r.other)}</td><td class="num">${peso(r.late)}</td><td class="num">${peso(r.undertime)}</td><td class="num" style="font-weight:700;">${peso(rowTotal(r))}</td></tr>`).join('')}
   </tbody><tfoot><tr style="font-weight:700;background:#fafbfc;"><td>GRAND TOTAL</td><td class="num">${peso(grand.basic)}</td><td class="num">${peso(grand.sss)}</td><td class="num">${peso(grand.philhealth)}</td><td class="num">${peso(grand.pagibig)}</td><td class="num">${peso(grand.loan)}</td><td class="num">${peso(grand.cashAdvance)}</td><td class="num">${peso(grand.other)}</td><td class="num">${peso(grand.late)}</td><td class="num">${peso(grand.undertime)}</td><td class="num">${peso(rowTotal(grand))}</td></tr></tfoot></table>
   ${rows.length===0?'<div class="empty-state">No deductions recorded for this period.</div>':''}`;
 }
