@@ -382,7 +382,7 @@ function updateSaveBtn(){
 // technically sophisticated person could bypass the UI via browser dev tools — but Layer 1
 // means nothing they do that way could actually be saved to the shared cloud data.
 let currentUserRole = 'admin'; // 'admin' | 'hr'
-const HR_WRITE_PREFIXES = ['save','del','add','edit','toggle','apply','sync','migrate','transfer','reset','confirm','remove','mark','create','upd','auto','new','wageIncrease','fix'];
+const HR_WRITE_PREFIXES = ['save','del','add','edit','toggle','apply','sync','migrate','transfer','reset','confirm','remove','mark','create','upd','auto','new','wageIncrease','fix','collect','undo','record'];
 const HR_WRITE_EXCEPTIONS = ['openEntryEditModal','openTimesheetModal','openTimesheetPicker','runTransferHistory','setCommissionRun'];
 const HR_WRITE_ALLOW = ['saveData']; // matches a write-prefix but is actually read-only (downloads a backup file)
 function hrExtractFnNames(attrVal){
@@ -1837,11 +1837,138 @@ function fixSssForRun(runId){
   });
   if(!changes.length){ toast("Every SSS amount in this run already matches the bracket."); return; }
   changes.sort((a,b)=> surnameKeyForEmp(a.emp).localeCompare(surnameKeyForEmp(b.emp)));
-  const list = changes.map(c=>`${displayNameLFM(c.emp)}: ${peso(c.old)} → ${peso(c.exp)}  (month basic ${peso(c.basic)})`).join('\n');
+  const list = changes.map(c=>`${displayNameLFM(c.emp)}: ${peso(c.old)} → ${peso(c.exp)}  (month basic ${peso(c.basic)})${c.en.disbursed===true ? '  [PAID NA — itatala ang '+(c.exp-c.old>0?'kulang':'sobra')+' na '+peso(Math.abs(c.exp-c.old))+']' : ''}`).join('\n');
   if(!confirm(`Update SSS for ${changes.length} employee${changes.length===1?'':'s'} to match the bracket? Only SSS changes — PhilHealth, Pag-IBIG and everything else are left alone.\n\n${list}`)) return;
-  changes.forEach(c=>{ c.en.sss = c.exp; });
+  let recorded = 0;
+  changes.forEach(c=>{
+    // If this person was already marked Paid, remember what was ACTUALLY paid out (SSS + take-home) before the
+    // fix changes the numbers, so the shortfall/overage can be tracked and collected later.
+    if(c.en.disbursed === true && !(c.en.sssCorrection && c.en.sssCorrection.collected)){
+      const prev = c.en.sssCorrection;
+      const paidSss = prev ? prev.paidSss : c.old;
+      const paidTakeHome = prev ? prev.paidTakeHome : calcEntry(c.emp, c.en, run).takeHome;
+      c.en.sssCorrection = { paidSss, paidTakeHome, correctSss: c.exp, shortfall: Math.round((c.exp - paidSss)*100)/100,
+        fixedAt: new Date().toISOString(), collected: false };
+      recorded++;
+    }
+    c.en.sss = c.exp;
+  });
   markDirty(); renderRunDetail();
-  toast(`SSS updated for ${changes.length} employee${changes.length===1?'':'s'}.`);
+  toast(`SSS updated for ${changes.length} employee${changes.length===1?'':'s'}.` + (recorded ? ` ${recorded} were already Paid — their kulang/sobra na SSS is now tracked for collection.` : ''));
+}
+// ---- SSS corrections on runs that were ALREADY paid out ----
+// fixSssForRun() stores en.sssCorrection = {paidSss, paidTakeHome, correctSss, shortfall, collected,...} on entries
+// that were marked Paid before the fix. shortfall > 0 = under-deducted (collect it); < 0 = over-deducted (refund it).
+function pendingSssCorrections(run){
+  return run.entries.filter(en=> en.sssCorrection && !en.sssCorrection.collected && Math.abs(num(en.sssCorrection.shortfall))>0.004);
+}
+function sssCorrectionLabel(run){ return fmtDate(run.periodStart)+' – '+fmtDate(run.periodEnd); }
+function openCollectSssModal(srcId){
+  const src = state.runs.find(r=>r.id===srcId); if(!src) return;
+  const targets = state.runs.filter(r=> r.id!==srcId && r.periodStart > src.periodEnd).sort((a,b)=> a.periodStart.localeCompare(b.periodStart));
+  if(!targets.length){ alert("Wala pang mas bagong payroll run. Gumawa muna ng susunod na run (hal. Oct 16–31), tapos bumalik dito."); return; }
+  const def = targets.find(r=>r.periodStart==='2026-10-16') || targets[targets.length-1];
+  const body = `<div class="field"><label>Kokolektahin sa anong run?</label><select id="collectTgtSel">${targets.map(r=>`<option value="${r.id}" ${r.id===def.id?'selected':''}>${sssCorrectionLabel(r)} (pay date ${fmtDate(r.payDate)})</option>`).join('')}</select></div>
+    <div class="muted" style="font-size:12px;">Ilalagay ang kulang na SSS sa <b>Other Deduction</b> ng bawat empleyado sa run na yun (at sa Adjustment kung sobra ang nakaltas). Makikita mo muna ang listahan bago mag-apply.</div>`;
+  openModal('Kolektahin ang kulang na SSS', body, `<button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="collectSssCorrections('${srcId}', document.getElementById('collectTgtSel').value)">Next</button>`);
+}
+function collectSssCorrections(srcId, tgtId){
+  const src = state.runs.find(r=>r.id===srcId), tgt = state.runs.find(r=>r.id===tgtId);
+  if(!src || !tgt) return;
+  const items = [], missing = [];
+  pendingSssCorrections(src).forEach(en=>{
+    const emp = empById(en.employeeId); if(!emp) return;
+    const te = tgt.entries.find(x=>x.employeeId===en.employeeId);
+    if(!te) missing.push(displayNameLFM(emp)); else items.push({ en, emp, te, k: en.sssCorrection });
+  });
+  if(!items.length){ alert(missing.length ? "Wala sa target run ang: "+missing.join(', ')+". Idagdag muna sila sa run." : "Walang kulang/sobrang SSS na kokolektahin mula sa run na ito."); return; }
+  items.sort((a,b)=> surnameKeyForEmp(a.emp).localeCompare(surnameKeyForEmp(b.emp)));
+  const total = items.reduce((a,i)=>a+i.k.shortfall,0);
+  const lines = items.map(i=>`${displayNameLFM(i.emp)}: ${i.k.shortfall>0 ? '+'+peso(i.k.shortfall)+' Other Deduction' : peso(-i.k.shortfall)+' ibabalik (Adjustment)'}   (naibigay ${peso(i.k.paidSss)}, dapat ${peso(i.k.correctSss)})`).join('\n');
+  if(!confirm(`I-apply sa run na ${sssCorrectionLabel(tgt)} (pay date ${fmtDate(tgt.payDate)})?\n\n${lines}\n\nNet total: ${peso(total)}${missing.length ? '\n\nHindi isasama (wala sa target run): '+missing.join(', ') : ''}`)) return;
+  const note = 'SSS correction '+sssCorrectionLabel(src);
+  items.forEach(i=>{
+    const amt = i.k.shortfall;
+    if(amt > 0){
+      i.te.otherDeduction = Math.round((num(i.te.otherDeduction)+amt)*100)/100;
+      i.te.otherDeductionNote = i.te.otherDeductionNote ? i.te.otherDeductionNote+'; '+note : note;
+    } else {
+      i.te.adjustment = Math.round((num(i.te.adjustment)-amt)*100)/100;
+      i.te.adjustmentNote = i.te.adjustmentNote ? i.te.adjustmentNote+'; '+note+' (refund)' : note+' (refund)';
+    }
+    i.k.collected = true; i.k.collectedRunId = tgt.id; i.k.collectedAt = new Date().toISOString();
+  });
+  markDirty(); closeModal(); renderRunDetail();
+  toast(`Nailagay sa ${sssCorrectionLabel(tgt)}: ${items.length} empleyado, net ${peso(total)}.`);
+}
+function undoSssCollection(srcId, empId){
+  const src = state.runs.find(r=>r.id===srcId); if(!src) return;
+  const en = src.entries.find(e=>e.employeeId===empId); const k = en && en.sssCorrection;
+  if(!k || !k.collected) return;
+  const tgt = state.runs.find(r=>r.id===k.collectedRunId);
+  const te = tgt && tgt.entries.find(x=>x.employeeId===empId);
+  if(!confirm(te ? `Bawiin ang pagkolekta? Tatanggalin ang ${peso(Math.abs(k.shortfall))} sa ${sssCorrectionLabel(tgt)}.` : "Wala na ang target run/entry. Ibabalik na lang sa 'hindi pa nakokolekta' ang status. Tuloy?")) return;
+  if(te){
+    if(k.shortfall > 0) te.otherDeduction = Math.max(0, Math.round((num(te.otherDeduction)-k.shortfall)*100)/100);
+    else te.adjustment = Math.round((num(te.adjustment)+k.shortfall)*100)/100;
+  }
+  if(te){
+    const note = 'SSS correction '+sssCorrectionLabel(src);
+    const strip = v => String(v||'').replace('; '+note+' (refund)','').replace(note+' (refund)','').replace('; '+note,'').replace(note,'').trim();
+    te.otherDeductionNote = strip(te.otherDeductionNote); te.adjustmentNote = strip(te.adjustmentNote);
+  }
+  k.collected = false; delete k.collectedRunId; delete k.collectedAt;
+  markDirty(); renderRunDetail();
+}
+// Recovery for when "Fix SSS to Bracket" was already clicked before the paid amounts were being tracked: reads an
+// Export-CSV file made BEFORE the fix (it holds what was actually computed/paid) and records, per employee whose SSS
+// has since changed, what was paid vs what it should have been.
+function parseCsvRows(text){
+  const rows = []; let row = [], cur = '', q = false;
+  for(let i=0;i<text.length;i++){
+    const ch = text[i];
+    if(q){ if(ch==='"'){ if(text[i+1]==='"'){ cur+='"'; i++; } else q=false; } else cur+=ch; }
+    else if(ch==='"') q=true;
+    else if(ch===','){ row.push(cur); cur=''; }
+    else if(ch==='\n' || ch==='\r'){ if(ch==='\r' && text[i+1]==='\n') i++; row.push(cur); cur=''; if(row.some(x=>x!=='')) rows.push(row); row=[]; }
+    else cur+=ch;
+  }
+  row.push(cur); if(row.some(x=>x!=='')) rows.push(row);
+  return rows;
+}
+function recordPaidSssPick(){ document.getElementById('paidSssFileInput').click(); }
+function recordPaidSssFromCsv(file){
+  const run = state.runs.find(r=>r.id===currentRunId); if(!run) return;
+  const reader = new FileReader();
+  reader.onload = ()=>{
+    const rows = parseCsvRows(String(reader.result||'').replace(/^\uFEFF/,''));
+    if(rows.length < 2){ alert("Walang laman ang CSV."); return; }
+    const hdr = rows[0].map(h=>h.trim().toLowerCase());
+    const iName = hdr.indexOf('name'), iSss = hdr.indexOf('sss'), iTake = hdr.indexOf('take-home');
+    if(iName<0 || iSss<0 || iTake<0){ alert("Hindi ito Export CSV ng payroll run (kailangan ang Name, SSS, at Take-Home na columns)."); return; }
+    const norm = x=>String(x||'').trim().replace(/\s+/g,' ').toUpperCase();
+    const byName = {}; rows.slice(1).forEach(r=>{ byName[norm(r[iName])] = r; });
+    const found = [], skipped = [];
+    run.entries.forEach(en=>{
+      const emp = empById(en.employeeId); if(!emp) return;
+      const r = byName[norm(emp.name)]; if(!r) return;
+      if(en.sssCorrection){ skipped.push(displayNameLFM(emp)); return; }
+      const oldSss = num(r[iSss]), oldTake = num(r[iTake]);
+      if(Math.abs(oldSss - num(en.sss)) <= 0.5) return;
+      found.push({ en, emp, oldSss, oldTake, shortfall: Math.round((num(en.sss) - oldSss)*100)/100 });
+    });
+    if(!found.length){ alert("Walang nakitang pagkakaiba ng SSS sa CSV at sa run na ito" + (skipped.length ? " (may naitala na para sa: "+skipped.join(', ')+")" : "") + ". Siguraduhing ang CSV ay galing sa tamang run at na-export BAGO ang Fix."); return; }
+    found.sort((a,b)=> surnameKeyForEmp(a.emp).localeCompare(surnameKeyForEmp(b.emp)));
+    const warn = (file.name.includes(run.periodStart) && file.name.includes(run.periodEnd)) ? '' : `\n\n⚠ Ang pangalan ng file (${file.name}) ay mukhang hindi para sa ${run.periodStart} to ${run.periodEnd}. Tiyaking tamang CSV ito.`;
+    const lines = found.map(f=>`${displayNameLFM(f.emp)}: naibigay ${peso(f.oldSss)} → dapat ${peso(num(f.en.sss))}  (${f.shortfall>0?'kulang':'sobra'} ${peso(Math.abs(f.shortfall))})`).join('\n');
+    if(!confirm(`Itatala ang naibigay na SSS para sa ${found.length} empleyado (galing sa CSV):\n\n${lines}${warn}`)) return;
+    found.forEach(f=>{
+      f.en.sssCorrection = { paidSss: f.oldSss, paidTakeHome: f.oldTake, correctSss: num(f.en.sss), shortfall: f.shortfall, fixedAt: new Date().toISOString(), collected: false, source: 'csv' };
+    });
+    markDirty(); renderRunDetail();
+    toast(`Naitala ang ${found.length} SSS correction${found.length===1?'':'s'}. Pwede mo nang i-kolekta sa susunod na run.`);
+  };
+  reader.readAsText(file);
 }
 function createRun(){
   const start = document.getElementById('np_start').value;
@@ -1920,6 +2047,9 @@ function renderRunDetail(){
     return { exp: sssLookup(basic), basic };
   };
   let sssOffCount = 0;
+  // Already-paid runs whose SSS was corrected after payout, and what's still owed / not yet collected.
+  const pendingHere = pendingSssCorrections(run);
+  const incoming = state.runs.filter(r=> r.id!==run.id && r.periodEnd < run.periodStart).map(r=>({ r, p: pendingSssCorrections(r) })).filter(x=>x.p.length);
   const rows = sortEntriesByName(run.entries).map(en=>{
     const emp = empById(en.employeeId);
     if(!emp) return '';
@@ -1953,14 +2083,16 @@ function renderRunDetail(){
       </td>
       <td class="num" style="font-weight:600;">${peso(c.totalEarnings)}</td>
       <td><label class="checkline"><input type="checkbox" ${en.applyStatutory!==false?'checked':''} onchange="updEntry('${emp.id}','applyStatutory',this.checked)"></label></td>
-      <td><input type="number" step="0.01" value="${en.sss}" onchange="updEntry('${emp.id}','sss',this.value)" title="${sssIsOff ? ('Hindi tugma sa SSS bracket — dapat ' + peso(sssChk.exp) + ' (month basic ' + peso(sssChk.basic) + '). Pindutin ang 🛠 Fix SSS to Bracket.') : (eligibleForStatutory(emp,'sss') ? '' : (emp.sssNo ? 'Marked \"Don\'t deduct\" on this employee\'s record' : 'No SSS No. on file for this employee'))}" style="${sssIsOff?'background:#fde8e8;border-color:#d33;color:#b00;font-weight:700;':(eligibleForStatutory(emp,'sss')?'':'background:#fff8e6;')}">${sssIsOff?`<div style="font-size:10px;color:#b00;white-space:nowrap;">dapat ${peso(sssChk.exp)}</div>`:''}</td>
+      <td><input type="number" step="0.01" value="${en.sss}" onchange="updEntry('${emp.id}','sss',this.value)" title="${sssIsOff ? ('Hindi tugma sa SSS bracket — dapat ' + peso(sssChk.exp) + ' (month basic ' + peso(sssChk.basic) + '). Pindutin ang 🛠 Fix SSS to Bracket.') : (eligibleForStatutory(emp,'sss') ? '' : (emp.sssNo ? 'Marked \"Don\'t deduct\" on this employee\'s record' : 'No SSS No. on file for this employee'))}" style="${sssIsOff?'background:#fde8e8;border-color:#d33;color:#b00;font-weight:700;':(eligibleForStatutory(emp,'sss')?'':'background:#fff8e6;')}">${sssIsOff?`<div style="font-size:10px;color:#b00;white-space:nowrap;">dapat ${peso(sssChk.exp)}</div>`:''}${en.sssCorrection ? (en.sssCorrection.collected
+        ? `<div style="font-size:10px;color:#1a7f37;max-width:130px;">✓ nakolekta ${peso(Math.abs(en.sssCorrection.shortfall))} <a href="#" class="no-print" onclick="event.preventDefault();undoSssCollection('${run.id}','${emp.id}')">undo</a></div>`
+        : `<div style="font-size:10px;color:#b45309;max-width:130px;font-weight:600;">Naibigay na ${peso(en.sssCorrection.paidSss)} → ${en.sssCorrection.shortfall>0?'kulang':'sobra'} ${peso(Math.abs(en.sssCorrection.shortfall))}</div>`) : ''}</td>
       <td><input type="number" step="0.01" value="${en.philhealth}" onchange="updEntry('${emp.id}','philhealth',this.value)" title="${eligibleForStatutory(emp,'philhealth') ? '' : (emp.philhealthNo ? 'Marked \"Don\'t deduct\" on this employee\'s record' : 'No PhilHealth No. on file for this employee')}" style="${eligibleForStatutory(emp,'philhealth')?'':'background:#fff8e6;'}"></td>
       <td><input type="number" step="0.01" value="${en.pagibig}" onchange="updEntry('${emp.id}','pagibig',this.value)" title="${eligibleForStatutory(emp,'pagibig') ? '' : (emp.pagibigNo ? 'Marked \"Don\'t deduct\" on this employee\'s record' : 'No Pag-IBIG No. on file for this employee')}" style="${eligibleForStatutory(emp,'pagibig')?'':'background:#fff8e6;'}"></td>
       <td class="num">${peso(c.lateDeduction)}</td>
       <td class="num">${peso(c.undertimeDeduction)}</td>
       <td><input type="number" step="0.01" value="${en.loanDeduction}" onchange="updEntry('${emp.id}','loanDeduction',this.value)"></td>
       <td><input type="number" step="0.01" value="${en.cashAdvanceDeduction}" onchange="updEntry('${emp.id}','cashAdvanceDeduction',this.value)"></td>
-      <td><input type="number" step="0.01" value="${en.otherDeduction}" onchange="updEntry('${emp.id}','otherDeduction',this.value)"></td>
+      <td><input type="number" step="0.01" value="${en.otherDeduction}" onchange="updEntry('${emp.id}','otherDeduction',this.value)">${en.otherDeductionNote ? `<div style="font-size:10px;color:#555;max-width:130px;white-space:normal;">${esc(en.otherDeductionNote)}</div>` : ''}</td>
       <td class="num" style="font-weight:600;">${peso(c.totalDeductions)}</td>
       <td class="num" style="font-weight:700;color:var(--brand-dark);">${peso(c.takeHome)}</td>
       <td><button class="btn btn-sm" onclick="removeFromRun('${emp.id}')" title="Remove from this run">✕</button></td>
@@ -1980,7 +2112,7 @@ function renderRunDetail(){
         <input type="file" id="attendanceFileInput" accept=".xlsx,.xls" style="display:none" onchange="if(this.files[0]) handleAttendanceFile(this.files[0]); this.value='';">
         ${isLastCutoffOfMonth(run) ? `<button class="btn" onclick="autoCalcStatutory('${run.id}')" title="Combines this cutoff's basic salary with the 1st–15th cutoff, looks up SSS from the bracket table, and carries forward PhilHealth/Pag-IBIG from the last payday">🧮 Auto-Calc SSS/PhilHealth/Pag-IBIG</button>` : ''}
         ${(()=>{ const sched = thirteenthSchedule(getThirteenthPlan()), i = sched.indexOf(run.payDate); return i>=0 ? `<button class="btn" onclick="apply13thMonthToRun('${run.id}')" title="Fills in each employee's 13th Month for this payday (${i===sched.length-1?'final payday — everyone\'s remaining balance':'only the employees assigned to this payday\'s batch'}) from their Dec–Nov basic salary — see Reports → 13th Month">🎄 Apply 13th Month${i===sched.length-1?' (balance)':' (batch)'}</button> <button class="btn" onclick="reset13thMonthForRun('${run.id}')" title="Sets every employee's 13th Month in this run back to ₱0">Clear 13th Month</button>` : ''; })()}
-        ${isLastCutoffOfMonth(run) ? `<button class="btn" onclick="fixSssForRun('${run.id}')" title="Recomputes ONLY the SSS amount from this month's combined Basic Salary vs the SSS bracket, and shows who changes before applying. Leaves PhilHealth/Pag-IBIG alone.">🛠 Fix SSS to Bracket</button>` : ''}
+        ${isLastCutoffOfMonth(run) ? `<button class="btn" onclick="fixSssForRun('${run.id}')" title="Recomputes ONLY the SSS amount from this month's combined Basic Salary vs the SSS bracket, and shows who changes before applying. Leaves PhilHealth/Pag-IBIG alone.">🛠 Fix SSS to Bracket</button> <button class="btn" onclick="recordPaidSssPick()" title="Naclick mo na ang Fix SSS dati at wala pang naitalang 'naibigay na'? I-upload ang CSV na na-export mo BAGO ang Fix (Export CSV) — itatala ng app kung magkano ang SSS/take-home na aktwal na naibigay.">📝 Itala ang naibigay na SSS (CSV)</button><input type="file" id="paidSssFileInput" accept=".csv" style="display:none" onchange="if(this.files[0]) recordPaidSssFromCsv(this.files[0]); this.value='';">` : ''}
         <button class="btn" onclick="syncLoanDeductionsForRun('${run.id}')" title="Pulls in any Loan/Cash Advance amount actually scheduled for this exact Pay Date from Loans & Deductions. Never zeroes out an existing figure just because nothing is scheduled on this exact date — only fills in/updates when something is really due, so manually-typed amounts are always safe.">🔄 Sync Loan Deductions</button>
         <button class="btn" onclick="exportRunCSV()">⬇ Export CSV</button>
         <button class="btn" onclick="openDisbursementList('${run.id}')" title="A focused list of who to pay, how (GCash/Bank/Cash), the account number, and how much — for actually sending out this cutoff's salaries">💸 Disbursement List</button>
@@ -1988,6 +2120,8 @@ function renderRunDetail(){
       </div>
     </div>
     <div class="section-body">
+      ${pendingHere.length ? `<div class="helpbox no-print" style="margin-bottom:10px;background:#fff7e0;border-color:#e0b020;">💰 <b>${pendingHere.length} empleyado</b> ang may naitalang SSS correction sa run na ito (naibigay na ang sweldo bago naayos): net <b>${peso(pendingHere.reduce((a,e)=>a+e.sssCorrection.shortfall,0))}</b> ang hindi pa nakokolekta. <button class="btn btn-sm" onclick="openCollectSssModal('${run.id}')">Kolektahin sa ibang run…</button></div>` : ''}
+      ${incoming.map(x=>`<div class="helpbox no-print" style="margin-bottom:10px;background:#fff7e0;border-color:#e0b020;">💰 May <b>${x.p.length} empleyado</b> mula sa run na ${sssCorrectionLabel(x.r)} na may hindi pa nakokolektang SSS correction (net <b>${peso(x.p.reduce((a,e)=>a+e.sssCorrection.shortfall,0))}</b>). <button class="btn btn-sm" onclick="collectSssCorrections('${x.r.id}','${run.id}')">I-kolekta sa run na ito</button></div>`).join('')}
       ${sssOffCount ? `<div class="helpbox no-print" style="margin-bottom:10px;background:#fff1e0;border-color:#f0a04b;color:#7a3e00;">⚠ <b>${sssOffCount} employee${sssOffCount===1?'':'s'}</b> ang SSS ay hindi tugma sa bracket (naka-red sa SSS column, may "dapat ₱…"). Madalas dahil may nabago sa hours/late pagkatapos pindutin ang Auto-Calc. <button class="btn btn-sm" onclick="fixSssForRun('${run.id}')">🛠 Fix SSS to Bracket</button></div>` : ''}
       <div class="flexrow no-print" style="margin-bottom:10px;align-items:center;">
         <label style="font-size:12.5px;font-weight:600;" for="runFilterSelect">Filter:</label>
@@ -2863,12 +2997,12 @@ function renderDisbursementList(runId){
     }
     const subtotal = list.reduce((a,r)=>a+r.c.takeHome,0);
     grand += subtotal;
-    grandPaid += list.filter(r=>r.en.disbursed===true).reduce((a,r)=>a+r.c.takeHome,0);
+    grandPaid += list.filter(r=>r.en.disbursed===true).reduce((a,r)=>a+(r.en.sssCorrection ? num(r.en.sssCorrection.paidTakeHome) : r.c.takeHome),0);
     return `<div style="margin-bottom:16px;">
       <h4 style="margin:0 0 6px;">${labels[method]} (${list.length})</h4>
       <table><thead><tr><th>Employee</th>${method==='bank' ? '<th>Bank</th>' : ''}<th>${method==='cash'?'':'Account No.'}</th><th class="num">Take-Home</th><th>Paid?</th></tr></thead><tbody>
       ${list.map(r=>`<tr>
-        <td>${esc(r.emp.name)}</td>
+        <td>${esc(r.emp.name)}${r.en.sssCorrection ? `<div style="font-size:10.5px;color:#b45309;font-weight:600;">Naibigay na: ${peso(r.en.sssCorrection.paidTakeHome)} (SSS ${peso(r.en.sssCorrection.paidSss)}) → ${r.en.sssCorrection.shortfall>0?'kulang':'sobra'} na SSS ${peso(Math.abs(r.en.sssCorrection.shortfall))}${r.en.sssCorrection.collected?' · ✓ nakolekta':''}</div>` : ''}</td>
         ${method==='bank' ? `<td>${r.emp.bankName ? esc(r.emp.bankName) : '<span class="muted">No bank on file</span>'}</td>` : ''}
         <td>${method==='cash' ? '—' : (r.account ? esc(r.account) : '<span class="muted">No account on file</span>')}</td>
         <td class="num" style="font-weight:600;">${peso(r.c.takeHome)}</td>
@@ -3201,7 +3335,7 @@ function payslipHtml(emp, en, run){
       <tr><td>PhilHealth</td><td class="num">${peso(c.philhealth)}</td></tr>
       <tr><td>Pag-IBIG</td><td class="num">${peso(c.pagibig)}</td></tr>
       <tr><td>Loan${loanNote ? `<div style="font-size:9px;color:#777;font-weight:400;">${esc(loanNote)}</div>` : ''}</td><td class="num">${peso(c.loanDeduction)}</td></tr>
-      <tr><td>Cash Advance / Other Deductions${caNote ? `<div style="font-size:9px;color:#777;font-weight:400;">Cash Advance: ${esc(caNote)}</div>` : ''}</td><td class="num">${peso(c.cashAdvanceDeduction + c.otherDeduction)}</td></tr>
+      <tr><td>Cash Advance / Other Deductions${caNote ? `<div style="font-size:9px;color:#777;font-weight:400;">Cash Advance: ${esc(caNote)}</div>` : ''}${en.otherDeductionNote ? `<div style="font-size:9px;color:#777;font-weight:400;">${esc(en.otherDeductionNote)}</div>` : ''}</td><td class="num">${peso(c.cashAdvanceDeduction + c.otherDeduction)}</td></tr>
       <tr><td>Late</td><td class="num">${peso(c.lateDeduction)}</td></tr>
       <tr><td>Undertime</td><td class="num">${peso(c.undertimeDeduction)}</td></tr>
       <tr class="totalrow"><td>Total Deductions</td><td class="num">${peso(c.totalDeductions)}</td></tr>
@@ -4522,9 +4656,25 @@ function renderDeductionsTable(){
   const sssExpected = r => (month!==null && r.sss>0) ? sssLookup(r.basic) : null;
   const sssOff = r => { const e = sssExpected(r); return e!==null && Math.abs(e - r.sss) > 0.5; };
   const offCount = rows.filter(sssOff).length;
+  const sssCorrRows = [];
+  state.runs.forEach(r=>{
+    const d = new Date(r.periodEnd);
+    if(d.getFullYear() !== year) return;
+    if(month !== null && (d.getMonth()+1) !== month) return;
+    r.entries.forEach(en=>{
+      if(!en.sssCorrection) return;
+      const emp = empById(en.employeeId); if(!emp) return;
+      sssCorrRows.push({ run:r, emp, k:en.sssCorrection, tgt: en.sssCorrection.collectedRunId ? state.runs.find(x=>x.id===en.sssCorrection.collectedRunId) : null });
+    });
+  });
+  sssCorrRows.sort((a,b)=> surnameKeyForEmp(a.emp).localeCompare(surnameKeyForEmp(b.emp)));
   wrap.innerHTML = `
   <div class="helpbox">${label} — ${rows.length} employee${rows.length===1?'':'s'} with deductions</div>
   ${offCount ? `<div class="helpbox" style="background:#fff4e5;border-color:#f0b429;">⚠ ${offCount} employee${offCount===1?'':'s'} below ${offCount===1?'has':'have'} an SSS amount that doesn't match the SSS bracket for ${esc(label)}'s total Basic Salary (shown in red, with what the bracket says). The SSS figure here is whatever is on their payroll entries — if hours/basic salary were edited after Auto-Calc was run, or the amount was carried over from an earlier run, it stays out of date until Auto-Calc is run again on the 16–end run.</div>` : ''}
+  ${sssCorrRows.length ? `<div class="helpbox" style="background:#fff7e0;border-color:#e0b020;"><b>💰 SSS corrections (naayos pagkatapos mabayaran ang sweldo)</b>
+    <table style="margin-top:6px;"><thead><tr><th>Employee</th><th>Run</th><th class="num">Naibigay na SSS</th><th class="num">Tamang SSS</th><th class="num">Kulang(+)/Sobra(-)</th><th>Status</th></tr></thead><tbody>
+    ${sssCorrRows.map(x=>`<tr><td>${esc(displayNameLFM(x.emp))}</td><td>${sssCorrectionLabel(x.run)}</td><td class="num">${peso(x.k.paidSss)}</td><td class="num">${peso(x.k.correctSss)}</td><td class="num" style="font-weight:700;">${peso(x.k.shortfall)}</td><td>${x.k.collected ? '✓ nakolekta sa ' + (x.tgt ? sssCorrectionLabel(x.tgt) : '(run na nawala)') : '<span style="color:#b45309;font-weight:600;">hindi pa nakokolekta</span>'}</td></tr>`).join('')}
+    </tbody></table></div>` : ''}
   <table class="sortable"><thead><tr><th>Employee</th><th class="num">Basic Salary</th><th class="num">SSS</th><th class="num">PhilHealth</th><th class="num">Pag-IBIG</th><th class="num">Loan</th><th class="num">Cash Adv.</th><th class="num">Other</th><th class="num">Late Ded.</th><th class="num">Undertime Ded.</th><th class="num">Total</th></tr></thead><tbody>
   ${rows.map(r=>`<tr><td>${esc(r.lfm)}</td><td class="num">${peso(r.basic)}</td><td class="num"${sssOff(r)?` style="color:#b42318;font-weight:700;" title="Bracket for this month's Basic Salary: ${peso(sssExpected(r))}"`:''}>${peso(r.sss)}${sssOff(r)?`<div style="font-size:10.5px;font-weight:600;">bracket: ${peso(sssExpected(r))}</div>`:''}</td><td class="num">${peso(r.philhealth)}</td><td class="num">${peso(r.pagibig)}</td><td class="num">${peso(r.loan)}</td><td class="num">${peso(r.cashAdvance)}</td><td class="num">${peso(r.other)}</td><td class="num">${peso(r.late)}</td><td class="num">${peso(r.undertime)}</td><td class="num" style="font-weight:700;">${peso(rowTotal(r))}</td></tr>`).join('')}
   </tbody><tfoot><tr style="font-weight:700;background:#fafbfc;"><td>GRAND TOTAL</td><td class="num">${peso(grand.basic)}</td><td class="num">${peso(grand.sss)}</td><td class="num">${peso(grand.philhealth)}</td><td class="num">${peso(grand.pagibig)}</td><td class="num">${peso(grand.loan)}</td><td class="num">${peso(grand.cashAdvance)}</td><td class="num">${peso(grand.other)}</td><td class="num">${peso(grand.late)}</td><td class="num">${peso(grand.undertime)}</td><td class="num">${peso(rowTotal(grand))}</td></tr></tfoot></table>
