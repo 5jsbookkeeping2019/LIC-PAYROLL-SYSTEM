@@ -3940,16 +3940,36 @@ function computeLoanEpisodes(list){
 // rows (no planId on the data), so this is inferred purely from employeeId+type+date each time the
 // table renders — accurate for the normal case of one loan/CA at a time per employee, same as how
 // the "Current balances still owed" figure above is already grouped by employee+type.
+// "Deduction X of Y" numbering. Counted PER LOAN, not per employee+type: each loan is its own series, so an
+// employee whose earlier loan is already finished starts again at 1 of N for a new loan of the same type
+// (instead of continuing the old count, e.g. "10 of 21"). A new series starts at (a) a positive row (the loan/CA
+// grant) or (b) an installment-plan row whose remarks say "Installment 1 of N", once the current series already
+// has deductions in it — the second rule covers a plan whose grant row happens to be dated after its first payday.
 function computeInstallmentPositions(list){
   const groups = {};
-  list.filter(l => num(l.amount) < 0).forEach(l=>{
+  list.forEach(l=>{
     const key = l.employeeId + '|' + l.type;
     (groups[key] = groups[key] || []).push(l);
   });
   const positions = {};
   Object.values(groups).forEach(group=>{
     group.sort((a,b)=> (a.date||'').localeCompare(b.date||'') || String(a.id).localeCompare(String(b.id)));
-    group.forEach((l,i)=>{ positions[l.id] = { index: i+1, total: group.length }; });
+    let series = [], planTotal = 0;
+    const flush = ()=>{ series.forEach((l,i)=>{ positions[l.id] = { index: i+1, total: series.length }; }); series = []; planTotal = 0; };
+    group.forEach(l=>{
+      const amt = num(l.amount);
+      // A grant row normally closes the previous loan's series — unless we're in the middle of an installment plan
+      // (its first payday is already listed and not all N installments are in yet), where a grant row dated a
+      // few days after the first payday must not cut the plan in two.
+      if(amt > 0){ if(!(planTotal && series.length < planTotal)) flush(); return; }
+      if(amt < 0){
+        const m = /^\s*installment\s+1\s+of\s+(\d+)/i.exec(String(l.remarks||''));
+        if(m && series.length) flush();
+        if(m) planTotal = Number(m[1]);
+        series.push(l);
+      }
+    });
+    flush();
   });
   return positions;
 }
