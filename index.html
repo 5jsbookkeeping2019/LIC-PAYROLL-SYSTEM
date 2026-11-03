@@ -3328,6 +3328,25 @@ function payslipHtml(emp, en, run){
   const dtrRows = buildPayslipDailyRows(en);
   const loanNote = loanInstallmentNoteForRun(emp, run, false);
   const caNote = loanInstallmentNoteForRun(emp, run, true);
+  // Itemised detail for the "Other Deductions" line: the note typed/auto-filled on the entry, plus — for an SSS
+  // correction collected in THIS run — what was actually deducted vs. what the SSS bracket required.
+  const otherDetail = [];
+  const sssDetail = [];
+  try{
+    (state.runs||[]).forEach(r2=>{
+      const e2 = (r2.entries||[]).find(x=>x.employeeId===emp.id);
+      const k = e2 && e2.sssCorrection;
+      if(k && k.collected && k.collectedRunId===run.id && k.shortfall>0){
+        sssDetail.push(`SSS ${fmtDate(r2.periodStart)} – ${fmtDate(r2.periodEnd)}: nakaltas ${peso(k.paidSss)}, dapat ${peso(k.correctSss)} → kulang ${peso(k.shortfall)}`);
+      }
+    });
+  }catch(e){}
+  // The auto-filled "SSS correction <period>" note is redundant once its itemised line (with the amounts) is shown.
+  if(en.otherDeductionNote){
+    const kept = String(en.otherDeductionNote).split('; ').filter(x=> !(sssDetail.length && /^SSS correction/.test(x)));
+    if(kept.length) otherDetail.push(kept.join('; '));
+  }
+  sssDetail.forEach(t=>otherDetail.push(t));
   return `<div class="payslip">
     <div class="payslip-topbar"></div>
     <div class="payslip-inner">
@@ -3397,7 +3416,7 @@ function payslipHtml(emp, en, run){
       <tr><td>PhilHealth</td><td class="num">${peso(c.philhealth)}</td></tr>
       <tr><td>Pag-IBIG</td><td class="num">${peso(c.pagibig)}</td></tr>
       <tr><td>Loan${loanNote ? `<div style="font-size:9px;color:#777;font-weight:400;">${esc(loanNote)}</div>` : ''}</td><td class="num">${peso(c.loanDeduction)}</td></tr>
-      <tr><td>Cash Advance / Other Deductions${caNote ? `<div style="font-size:9px;color:#777;font-weight:400;">Cash Advance: ${esc(caNote)}</div>` : ''}${en.otherDeductionNote ? `<div style="font-size:9px;color:#777;font-weight:400;">${esc(en.otherDeductionNote)}</div>` : ''}</td><td class="num">${peso(c.cashAdvanceDeduction + c.otherDeduction)}</td></tr>
+      ${(c.cashAdvanceDeduction || c.otherDeduction) ? `${c.cashAdvanceDeduction ? `<tr><td>Cash Advance${caNote ? `<div style="font-size:9px;color:#777;font-weight:400;">${esc(caNote)}</div>` : ''}</td><td class="num">${peso(c.cashAdvanceDeduction)}</td></tr>` : ''}${c.otherDeduction ? `<tr><td>Other Deductions${otherDetail.map(t=>`<div style="font-size:9px;color:#777;font-weight:400;">${esc(t)}</div>`).join('')}</td><td class="num">${peso(c.otherDeduction)}</td></tr>` : ''}` : `<tr><td>Cash Advance / Other Deductions</td><td class="num">${peso(0)}</td></tr>`}
       <tr><td>Late</td><td class="num">${peso(c.lateDeduction)}</td></tr>
       <tr><td>Undertime</td><td class="num">${peso(c.undertimeDeduction)}</td></tr>
       <tr class="totalrow"><td>Total Deductions</td><td class="num">${peso(c.totalDeductions)}</td></tr>
