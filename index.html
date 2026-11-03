@@ -325,6 +325,7 @@ function defaultState(){
     employees: STARTER_EMPLOYEES,
     runs: STARTER_RUNS,
     incentiveLeave: STARTER_LEAVE,
+    mcLeave: [],
     commissions: STARTER_COMMISSIONS,
     loans: STARTER_LOANS,
     meta: { savedAt: null, fileVersion: 1 }
@@ -382,7 +383,7 @@ function updateSaveBtn(){
 // technically sophisticated person could bypass the UI via browser dev tools — but Layer 1
 // means nothing they do that way could actually be saved to the shared cloud data.
 let currentUserRole = 'admin'; // 'admin' | 'hr'
-const HR_WRITE_PREFIXES = ['save','del','add','edit','toggle','apply','sync','migrate','transfer','reset','confirm','remove','mark','create','upd','auto','new','wageIncrease','fix','collect','undo','record'];
+const HR_WRITE_PREFIXES = ['save','del','add','edit','toggle','apply','sync','migrate','transfer','reset','confirm','remove','mark','create','upd','auto','new','wageIncrease','fix','collect','undo','record','convert'];
 const HR_WRITE_EXCEPTIONS = ['openEntryEditModal','openTimesheetModal','openTimesheetPicker','runTransferHistory','setCommissionRun'];
 const HR_WRITE_ALLOW = ['saveData']; // matches a write-prefix but is actually read-only (downloads a backup file)
 function hrExtractFnNames(attrVal){
@@ -533,6 +534,7 @@ async function loadStateFromCloud(){
     await saveStateToCloud(true);
   }
   if(!state.settings.hrEmails) state.settings.hrEmails = [];
+  if(!Array.isArray(state.mcLeave)) state.mcLeave = [];
   dirty = false; updateSaveBtn(); initPageFromHash(); render();
 }
 async function saveStateToCloud(silent){
@@ -598,6 +600,7 @@ async function handleEmployeeLogin(){
     employees: [data.employee],
     runs: data.runs || [],
     incentiveLeave: data.incentiveLeave || [],
+    mcLeave: data.mcLeave || [],
     commissions: data.commissions || [],
     company: data.company || {},
     settings: data.settings || {}
@@ -953,6 +956,10 @@ function calcEntry(emp, entry, run){
   // 0) by falling back to the stored value whenever incentiveLeaveDays isn't set.
   const incentiveLeaveDays = num(entry.incentiveLeaveDays);
   const incentiveLeavePay = incentiveLeaveDays > 0 ? incentiveLeaveDays * rateDay : num(entry.incentiveLeavePay);
+  // Magna Carta of Women (RA 9710) Special Leave — tracked and paid separately from the 5-day Incentive Leave:
+  // days × daily rate (full pay), never counted against the Incentive Leave balance.
+  const mcLeaveDays = num(entry.mcLeaveDays);
+  const mcLeavePay = mcLeaveDays * rateDay;
   const allowance = computeAllowance(emp, entry, run);
   const adjustment = num(entry.adjustment);
   // LIC and Production commissions logged in the Commission Log (Commissions tab) and explicitly
@@ -981,7 +988,7 @@ function calcEntry(emp, entry, run){
   const otPay = otApproved ? hr * num(state.settings.otMultiplier) * otHours : 0;
   const holidayPay = rateDay * holidayDays;
 
-  const totalEarnings = basicSalary + restDayPay + otPay + holidayPay + commission + logCommission + thirteenthMonth + incentiveLeavePay + allowance + adjustment;
+  const totalEarnings = basicSalary + restDayPay + otPay + holidayPay + commission + logCommission + thirteenthMonth + incentiveLeavePay + mcLeavePay + allowance + adjustment;
 
   // OJTs are flat-rate-per-day (see isOJT above) — Late/Undertime pesos deductions are skipped for
   // them, but only for runs dated on/after OJT_NO_LATE_UNDERTIME_FROM, so older, already-processed
@@ -1004,7 +1011,7 @@ function calcEntry(emp, entry, run){
   const totalDeductions = sss + philhealth + pagibig + lateDeduction + undertimeDeduction + loanDeduction + cashAdvanceDeduction + otherDeduction;
   const takeHome = totalEarnings - totalDeductions;
 
-  return { hourlyRate:hr, rateDay, basicSalary, restDayPay, otPay, otApproved, holidayPay, incentiveLeaveDays, incentiveLeavePay, allowance, logCommission, totalEarnings,
+  return { hourlyRate:hr, rateDay, basicSalary, restDayPay, otPay, otApproved, holidayPay, incentiveLeaveDays, incentiveLeavePay, mcLeaveDays, mcLeavePay, allowance, logCommission, totalEarnings,
     lateDeduction, undertimeDeduction, sss, philhealth, pagibig, loanDeduction, cashAdvanceDeduction, otherDeduction,
     totalDeductions, takeHome };
 }
@@ -1041,6 +1048,7 @@ function loadData(file){
       const parsed = JSON.parse(e.target.result);
       if(!parsed.employees || !parsed.settings){ throw new Error("Not a valid payroll data file"); }
       state = parsed;
+      if(!Array.isArray(state.mcLeave)) state.mcLeave = [];
       render();
       toast("Backup restored — saving to cloud…");
       await saveStateToCloud(true);
@@ -1982,7 +1990,7 @@ function createRun(){
     const d = scheduledDeductionsForRun(emp.id, run);
     run.entries.push({
       employeeId: emp.id, hoursWorked:0, lateMinutes:0, undertimeMinutes:0, otHours:0, restDayHours:0, holidayDays:0,
-      commission:0, thirteenthMonth:0, incentiveLeaveDays:0, incentiveLeavePay:0, allowanceOverride:"", adjustment:0,
+      commission:0, thirteenthMonth:0, incentiveLeaveDays:0, mcLeaveDays:0, incentiveLeavePay:0, allowanceOverride:"", adjustment:0,
       applyStatutory: isLastCutoff,
       sss: (eligibleForStatutory(emp,'sss') && prev) ? num(prev.sss) : 0,
       philhealth: !eligibleForStatutory(emp,'philhealth') ? 0 : (prev ? num(prev.philhealth) : philhealthCompute(emp.rateDay*22)),
@@ -2075,6 +2083,7 @@ function renderRunDetail(){
       <td><input type="number" step="0.01" value="${en.commission}" onchange="updEntry('${emp.id}','commission',this.value)" title="Manual/ad hoc commission typed directly into this run"></td>
       <td class="num" title="From LIC/Production Commission Log entries linked to this Pay Period — manage the link from the Commissions tab.">${peso(c.logCommission)}</td>
       <td><input type="number" step="0.01" value="${en.thirteenthMonth}" onchange="updEntry('${emp.id}','thirteenthMonth',this.value)"></td>
+      <td><input type="number" step="0.5" value="${en.mcLeaveDays||0}" onchange="updEntry('${emp.id}','mcLeaveDays',this.value)" title="Magna Carta of Women special leave: Days × ${peso(c.rateDay)}/day = ${peso(c.mcLeavePay)}. Separate from Incentive Leave."></td>
       <td><input type="number" step="0.5" value="${en.incentiveLeaveDays||0}" onchange="updEntry('${emp.id}','incentiveLeaveDays',this.value)" title="Days × ${peso(c.rateDay)}/day = ${peso(c.incentiveLeavePay)}"></td>
       <td><input type="number" step="0.01" placeholder="${emp.allowance}" value="${en.allowanceOverride}" onchange="updEntry('${emp.id}','allowanceOverride',this.value)"></td>
       <td>
@@ -2134,12 +2143,12 @@ function renderRunDetail(){
       <table>
         <thead><tr>
           <th>Employee</th><th>Hrs Worked</th><th>Late (min)</th><th>Undertime (min)</th><th>OT Hrs</th><th>OT Form?</th><th>Rest Day Hrs</th><th>Holiday Days</th>
-          <th>Commission</th><th>Log Commission<br><span class="muted" style="font-weight:400;">(LIC/Prod)</span></th><th>13th Month</th><th>Incentive Leave (Days)</th><th>Allowance</th><th>Adj.</th><th>Total Earnings</th>
+          <th>Commission</th><th>Log Commission<br><span class="muted" style="font-weight:400;">(LIC/Prod)</span></th><th>13th Month</th><th>Magna Carta Leave (Days)</th><th>Incentive Leave (Days)</th><th>Allowance</th><th>Adj.</th><th>Total Earnings</th>
           <th>Apply</th><th>SSS</th><th>PhilHealth</th><th>Pag-IBIG</th><th>Late Ded.</th><th>Undertime Ded.</th><th>Loan</th><th>Cash Adv.</th><th>Other Ded.</th><th>Total Ded.</th><th>Take-Home</th><th></th>
         </tr></thead>
-        <tbody>${shownCount>0 ? rows : `<tr><td colspan="26" class="empty-state">No employees match this filter for this run.</td></tr>`}</tbody>
+        <tbody>${shownCount>0 ? rows : `<tr><td colspan="27" class="empty-state">No employees match this filter for this run.</td></tr>`}</tbody>
         <tfoot><tr style="font-weight:700;background:#fafbfc;">
-          <td colspan="14" class="num">TOTALS</td>
+          <td colspan="15" class="num">TOTALS</td>
           <td class="num">${peso(totalEarnings)}</td>
           <td colspan="9"></td>
           <td class="num">${peso(totalDeductions)}</td>
@@ -2349,7 +2358,7 @@ function renderTimesheetModal(empId){
       <td class="num" title="Left before Schedule To on a full-day attempt — deducted separately, same as Late, per DOLE's actual-time-not-rendered rule.">${isRestDay ? '—' : undertimeMinutes.toFixed(0)}</td>
       <td class="num" title="${lateMinutes>0 ? 'Voided — he was late this day' : ''}">${isRestDay ? '—' : otHours.toFixed(2)}</td>
       <td class="num" title="${isRestDay ? 'Saturday/Sunday work — counted as Rest Day, not regular hours' : ''}">${isRestDay ? hoursWorked.toFixed(2) : '—'}</td>
-      <td><input type="text" data-idx="${idx}" data-field="remarks" value="${esc(day.remarks)}" placeholder="e.g. Rest Day" title="Type exactly LWP to auto-log this day as 1 used Incentive Leave day for this employee — it'll show up in the Incentive Leave Tracker automatically." onchange="updTimesheetDay('${empId}',${idx},'remarks',this.value)"></td>
+      <td><input type="text" data-idx="${idx}" data-field="remarks" value="${esc(day.remarks)}" placeholder="e.g. Rest Day" title="Type exactly LWP to auto-log this day as 1 used Incentive Leave day. Type exactly MCW to log it as 1 day of Magna Carta of Women special leave instead (separate 60-day tracker, not counted against Incentive Leave)." onchange="updTimesheetDay('${empId}',${idx},'remarks',this.value)"></td>
       <td style="text-align:center;"><input type="checkbox" data-idx="${idx}" data-field="isProduction" ${day.isProduction ? 'checked' : ''} title="Check only for a day this person actually worked in the Production Department (e.g. Alfie helping out that day)." onchange="updTimesheetDay('${empId}',${idx},'isProduction',this.checked)"></td>
     </tr>`;
   }).join('');
@@ -2378,7 +2387,9 @@ function renderTimesheetModal(empId){
       </tr></tfoot>
     </table>
     </div>`;
+  const lwpCount = en.timesheet.filter(d=>String(d.remarks||'').trim().toUpperCase()==='LWP').length;
   const foot = `<button class="btn" onclick="closeModal()">Close</button>
+    ${lwpCount ? `<button class="btn" onclick="convertLwpToMcLeave('${empId}')" title="Inililipat ang lahat ng LWP day dito mula sa Incentive Leave papunta sa Magna Carta of Women Leave (60 days)">↪ Ilipat ang ${lwpCount} LWP → Magna Carta Leave</button>` : ''}
     <button class="btn btn-primary" onclick="applyTimesheetToEntry('${empId}')">Apply Totals to Payroll Entry</button>`;
   openModal(`🕐 Time Sheet — ${esc(emp.name)}`, body, foot, {wide:true});
 }
@@ -2433,12 +2444,16 @@ function syncLeaveFromTimesheetDay(empId, date){
   const run = state.runs.find(r=>r.id===currentRunId);
   const en = run && run.entries.find(e=>e.employeeId===empId);
   const day = en && en.timesheet && en.timesheet.find(d=>d.date===date);
-  const isLWP = !!day && String(day.remarks||'').trim().toUpperCase() === 'LWP';
+  const code = day ? String(day.remarks||'').trim().toUpperCase() : '';
+  const isLWP = code === 'LWP';
+  const isMCW = code === 'MCW'; // Magna Carta of Women special leave — own tracker + own pay line
+  const year = new Date(date+'T00:00:00').getFullYear();
+  const note = `1 DAY - ${new Date(date+'T00:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric'}).toUpperCase()}`;
+
+  // ---- Incentive Leave side (LWP) ----
   const existingIdx = state.incentiveLeave.findIndex(l=>l.source==='timesheet' && l.employeeId===empId && l.date===date);
   const wasLWP = existingIdx >= 0;
   if(isLWP){
-    const year = new Date(date+'T00:00:00').getFullYear();
-    const note = `1 DAY - ${new Date(date+'T00:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric'}).toUpperCase()}`;
     if(existingIdx>=0){
       state.incentiveLeave[existingIdx].used = 1;
       state.incentiveLeave[existingIdx].year = year;
@@ -2453,6 +2468,50 @@ function syncLeaveFromTimesheetDay(empId, date){
     if(isLWP && !wasLWP) en.incentiveLeaveDays = num(en.incentiveLeaveDays) + 1;
     else if(!isLWP && wasLWP) en.incentiveLeaveDays = Math.max(0, num(en.incentiveLeaveDays) - 1);
   }
+
+  // ---- Magna Carta Leave side (MCW): same +1/-1 delta pattern, on its own tracker + its own pay field ----
+  if(!Array.isArray(state.mcLeave)) state.mcLeave = [];
+  const mcIdx = state.mcLeave.findIndex(l=>l.source==='timesheet' && l.employeeId===empId && l.date===date);
+  const wasMCW = mcIdx >= 0;
+  if(isMCW){
+    // First time this employee gets an MC Leave day: auto-create her 60-day entitlement (editable in the tracker).
+    if(!state.mcLeave.some(l=>l.employeeId===empId)){
+      state.mcLeave.push({ id: uid('mc'), employeeId: empId, entitled: 60, used: 0, note: '', reason: 'Magna Carta of Women (RA 9710) special leave', source: 'grant' });
+    }
+    if(mcIdx>=0){ state.mcLeave[mcIdx].used = 1; state.mcLeave[mcIdx].note = note; }
+    else state.mcLeave.push({ id: uid('mc'), employeeId: empId, entitled: 0, used: 1, note, source: 'timesheet', date });
+  } else if(mcIdx>=0){
+    state.mcLeave.splice(mcIdx, 1);
+  }
+  if(en){
+    if(isMCW && !wasMCW) en.mcLeaveDays = num(en.mcLeaveDays) + 1;
+    else if(!isMCW && wasMCW) en.mcLeaveDays = Math.max(0, num(en.mcLeaveDays) - 1);
+  }
+}
+// One-click move of every "LWP" day on this employee's Time Sheet (this pay period) from Incentive Leave to
+// Magna Carta Leave: remarks LWP -> MCW, the Incentive Leave tracker record + Incentive Leave (Days) are taken
+// back out, and the same days are logged under MC Leave (tracker + MC Leave (Days) pay field) instead.
+function convertLwpToMcLeave(empId){
+  const run = state.runs.find(r=>r.id===currentRunId);
+  const en = run && run.entries.find(e=>e.employeeId===empId);
+  const emp = empById(empId);
+  if(!en || !emp) return;
+  const days = (en.timesheet||[]).filter(d=>String(d.remarks||'').trim().toUpperCase()==='LWP');
+  if(!days.length){ alert("Walang araw na may remarks na LWP sa Time Sheet na ito. Pwede mong i-type ang MCW sa Remarks ng mismong araw, o ilagay ang bilang ng araw sa 'Magna Carta Leave (Days)' sa payroll entry (at bawasan ang Incentive Leave (Days))."); return; }
+  const list = days.map(d=>fmtDate(d.date)).join(', ');
+  if(!confirm(`Ilipat ang ${days.length} LWP day${days.length===1?'':'s'} ni ${emp.name} (${list}) mula sa Incentive Leave papunta sa Magna Carta Leave?\n\n• Mababawas ang ${days.length} sa Incentive Leave (Days) at Incentive Leave Tracker (hindi na mabibilang sa 5 days)\n• Madadagdag ang ${days.length} sa Magna Carta Leave (Days) — pareho pa rin ang bayad (araw × daily rate)`)) return;
+  days.forEach(d=>{
+    // A legacy LWP day with no auto-logged tracker record never had its +1 taken back out by the normal sync
+    // (which only reverses what it logged itself) — handle that here so the day is not paid twice.
+    const hadRecord = state.incentiveLeave.some(l=>l.source==='timesheet' && l.employeeId===empId && l.date===d.date);
+    if(!hadRecord) en.incentiveLeaveDays = Math.max(0, num(en.incentiveLeaveDays) - 1);
+    d.remarks = 'MCW';
+    syncLeaveFromTimesheetDay(empId, d.date);
+  });
+  markDirty();
+  rerenderTimesheetPreservingFocus(empId);
+  renderRunDetail();
+  toast(`${days.length} day${days.length===1?'':'s'} inilipat sa Magna Carta Leave.`);
 }
 function updTimesheetSched(empId, field, value){
   const run = state.runs.find(r=>r.id===currentRunId);
@@ -2871,6 +2930,7 @@ function renderEntryEditModal(empId){
       <div class="field"><label>Commission (manual)</label><input type="number" step="0.01" value="${en.commission}" onchange="updEntryModalField('${empId}','commission',this.value)"></div>
       <div class="field"><label>Log Commission (LIC/Prod, linked)</label><input value="${peso(c.logCommission)}" disabled title="Manage the link from the Commissions tab"></div>
       <div class="field"><label>13th Month</label><input type="number" step="0.01" value="${en.thirteenthMonth}" onchange="updEntryModalField('${empId}','thirteenthMonth',this.value)"></div>
+      <div class="field"><label>Magna Carta Leave (Days)</label><input type="number" step="0.5" value="${en.mcLeaveDays||0}" onchange="updEntryModalField('${empId}','mcLeaveDays',this.value)" title="Magna Carta of Women special leave — Days × ${peso(c.rateDay)}/day = ${peso(c.mcLeavePay)}. Separate from Incentive Leave."></div>
       <div class="field"><label>Incentive Leave (Days)</label><input type="number" step="0.5" value="${en.incentiveLeaveDays||0}" onchange="updEntryModalField('${empId}','incentiveLeaveDays',this.value)" title="Days × ${peso(c.rateDay)}/day = ${peso(c.incentiveLeavePay)}"></div>
       <div class="field"><label>Allowance override</label><input type="number" step="0.01" placeholder="${emp.allowance}" value="${en.allowanceOverride}" onchange="updEntryModalField('${empId}','allowanceOverride',this.value)"></div>
     </div>
@@ -2920,7 +2980,7 @@ function confirmAddEmployeeToRun(){
   const prev = lastEntryForEmployee(empId);
   const d = scheduledDeductionsForRun(empId, run);
   run.entries.push({ employeeId: empId, hoursWorked:0, lateMinutes:0, undertimeMinutes:0, otHours:0, otApproved:false, restDayHours:0, holidayDays:0,
-    commission:0, thirteenthMonth:0, incentiveLeaveDays:0, incentiveLeavePay:0, allowanceOverride:"", adjustment:0, applyStatutory:true,
+    commission:0, thirteenthMonth:0, incentiveLeaveDays:0, mcLeaveDays:0, incentiveLeavePay:0, allowanceOverride:"", adjustment:0, applyStatutory:true,
     sss: (eligibleForStatutory(emp,'sss') && prev) ? num(prev.sss) : 0,
     philhealth: (eligibleForStatutory(emp,'philhealth') && prev) ? num(prev.philhealth) : 0,
     pagibig: (eligibleForStatutory(emp,'pagibig') && prev) ? num(prev.pagibig) : 0,
@@ -2935,14 +2995,14 @@ function removeFromRun(empId){
 function exportRunCSV(){
   const run = state.runs.find(r=>r.id===currentRunId);
   if(!run) return;
-  const header = ['Name','Position','Rate/Day','Hours Worked','Late Min','Undertime Min','OT Hrs','OT Form?','Rest Day Hrs','Holiday Days','Commission','Log Commission (LIC/Prod)','13th Month','Incentive Leave Days','Incentive Leave Pay','Allowance','Adjustment','Total Earnings','SSS','PhilHealth','Pag-IBIG','Late Ded.','Undertime Ded.','Loan','Cash Advance','Other Ded.','Total Deductions','Take-Home','Payment Method','Bank Name','Account'];
+  const header = ['Name','Position','Rate/Day','Hours Worked','Late Min','Undertime Min','OT Hrs','OT Form?','Rest Day Hrs','Holiday Days','Commission','Log Commission (LIC/Prod)','13th Month','Incentive Leave Days','Incentive Leave Pay','MC Leave Days','MC Leave Pay','Allowance','Adjustment','Total Earnings','SSS','PhilHealth','Pag-IBIG','Late Ded.','Undertime Ded.','Loan','Cash Advance','Other Ded.','Total Deductions','Take-Home','Payment Method','Bank Name','Account'];
   const lines = [header.join(',')];
   run.entries.forEach(en=>{
     const emp = empById(en.employeeId); if(!emp) return;
     const c = calcEntry(emp, en, run);
     const allowance = c.allowance;
     const row = [emp.name, emp.position, c.rateDay, en.hoursWorked, en.lateMinutes, (en.undertimeMinutes||0), en.otHours, (en.otApproved===true?'Yes':'No'), en.restDayHours, en.holidayDays,
-      en.commission, c.logCommission.toFixed(2), en.thirteenthMonth, (en.incentiveLeaveDays||0), c.incentiveLeavePay.toFixed(2), allowance, en.adjustment, c.totalEarnings.toFixed(2),
+      en.commission, c.logCommission.toFixed(2), en.thirteenthMonth, (en.incentiveLeaveDays||0), c.incentiveLeavePay.toFixed(2), (en.mcLeaveDays||0), c.mcLeavePay.toFixed(2), allowance, en.adjustment, c.totalEarnings.toFixed(2),
       c.sss.toFixed(2), c.philhealth.toFixed(2), c.pagibig.toFixed(2), c.lateDeduction.toFixed(2), c.undertimeDeduction.toFixed(2), c.loanDeduction.toFixed(2),
       c.cashAdvanceDeduction.toFixed(2), c.otherDeduction.toFixed(2), c.totalDeductions.toFixed(2), c.takeHome.toFixed(2),
       emp.paymentMethod, (emp.paymentMethod==='bank' ? (emp.bankName||'') : ''), (emp.gcashNo||emp.bankAcct||'')];
@@ -3264,6 +3324,7 @@ function payslipHtml(emp, en, run){
   const daysWorked = Math.round((num(en.hoursWorked)/8)*10)/10;
   const ytd = computeYTDForEmployee(emp.id, run.payDate || run.periodEnd);
   const leave = getLeaveInfoForEmployee(emp.id, new Date(run.periodEnd).getFullYear());
+  const mcl = mcLeaveInfoForEmployee(emp.id);
   const dtrRows = buildPayslipDailyRows(en);
   const loanNote = loanInstallmentNoteForRun(emp, run, false);
   const caNote = loanInstallmentNoteForRun(emp, run, true);
@@ -3322,6 +3383,7 @@ function payslipHtml(emp, en, run){
       ${num(en.commission) ? `<tr><td>Commission</td><td class="num">${peso(en.commission)}</td></tr>` : ''}
       ${c.logCommission ? `<tr><td>LIC/Production Commission</td><td class="num">${peso(c.logCommission)}</td></tr>` : ''}
       <tr><td>13th Month Pay</td><td class="num">${peso(en.thirteenthMonth)}</td></tr>
+      ${c.mcLeaveDays>0 ? `<tr><td>Magna Carta Leave (${c.mcLeaveDays} day${c.mcLeaveDays===1?'':'s'})</td><td class="num">${peso(c.mcLeavePay)}</td></tr>` : ''}
       <tr><td>Incentive Leave${c.incentiveLeaveDays>0 ? ` (${c.incentiveLeaveDays} day${c.incentiveLeaveDays===1?'':'s'})` : ''}</td><td class="num">${peso(c.incentiveLeavePay)}</td></tr>
       <tr><td>Allowance</td><td class="num">${peso(allowance)}</td></tr>
       ${num(en.adjustment) ? `<tr><td>Salary Adjustment${en.adjustmentNote ? `<div style="font-size:9px;color:#777;font-weight:400;">${esc(en.adjustmentNote)}</div>` : ''}</td><td class="num">${peso(en.adjustment)}</td></tr>` : `<tr><td>Salary Adjustment</td><td class="num">${peso(en.adjustment)}</td></tr>`}
@@ -3351,6 +3413,7 @@ function payslipHtml(emp, en, run){
       <tr><td>Used Leave</td><td>${leave.used}</td></tr>
       ${leave.dates ? `<tr><td>Used Leave Dates</td><td style="white-space:normal;">${esc(leave.dates)}</td></tr>` : ''}
       <tr><td>Remaining Leave Balance</td><td>${leave.balance}</td></tr>
+      ${mcl.hasRecords ? `<tr><td>Magna Carta Leave (entitled / used / balance)</td><td>${mcl.entitled} / ${mcl.used} / ${mcl.balance}</td></tr>${mcl.dates ? `<tr><td>Magna Carta Leave Dates</td><td style="white-space:normal;">${esc(mcl.dates)}</td></tr>` : ''}` : ''}
       <tr class="divider"><td colspan="2"><div class="hr"></div></td></tr>
       <tr><td>YTD Payroll ${ytd.year}</td><td>${peso(ytd.payrollTotal)}</td></tr>
       <tr><td>YTD LIC Commission ${ytd.year}</td><td>${peso(ytd.licCommission)}</td></tr>
@@ -3380,10 +3443,18 @@ function renderLeave(root){
       </div>
     </div>
     <div class="section-body"><div class="table-wrap" id="leaveTableWrap"></div></div>
+  </div>
+  <div class="section" id="mcLeaveSection">
+    <div class="section-head">
+      <div><h3>Magna Carta of Women Special Leave</h3><div class="desc">RA 9710 — up to 60 days (2 months) with full pay for covered women employees (e.g. after gynecological surgery). Tracked separately: it does NOT use up the 5-day Incentive Leave. In the Time Sheet, type <b>MCW</b> in a day's Remarks to log it here.</div></div>
+      <div class="flexrow no-print"><button class="btn btn-primary" onclick="addMcLeaveModal()">+ Add Employee to MC Leave</button></div>
+    </div>
+    <div class="section-body"><div class="table-wrap" id="mcLeaveTableWrap"></div></div>
   </div>`;
   document.getElementById('leaveYearSel').addEventListener('change', e=>{ renderLeave._year = Number(e.target.value); renderLeaveTable(); });
   renderLeave._year = selYear;
   renderLeaveTable();
+  renderMcLeaveTable();
 }
 function renderLeaveTable(){
   const wrap = document.getElementById('leaveTableWrap'); if(!wrap) return;
@@ -3402,6 +3473,76 @@ function renderLeaveTable(){
     return `<tr><td>${esc(displayNameLFM(emp))}</td><td class="num">${entitled}</td><td class="num">${used}</td><td class="num" style="font-weight:700;">${balance}</td><td class="muted" style="white-space:normal;">${esc(notes)}</td><td class="no-print"><button class="btn btn-sm" onclick="editEntitledPrompt('${emp.id}', ${year})" title="Directly correct this employee's Entitled/Used totals for ${year}">✎ Edit</button></td></tr>`;
   }).join('')}
   </tbody></table>`;
+}
+/* ---- Magna Carta of Women special leave (RA 9710): own tracker, not tied to a calendar year, 60 days per case ---- */
+function mcLeaveInfoForEmployee(empId){
+  const recs = (state.mcLeave||[]).filter(l=>l.employeeId===empId);
+  const entitled = recs.reduce((a,r)=>a+num(r.entitled),0);
+  const used = recs.reduce((a,r)=>a+num(r.used),0);
+  const dates = recs.filter(r=>r.note).sort((a,b)=> String(a.date||'').localeCompare(String(b.date||''))).map(r=>r.note).join(' | ');
+  const reasonRec = recs.find(r=>r.reason);
+  return { hasRecords: recs.length>0, entitled, used, balance: entitled-used, dates, reason: reasonRec ? reasonRec.reason : '', recs };
+}
+function renderMcLeaveTable(){
+  const wrap = document.getElementById('mcLeaveTableWrap'); if(!wrap) return;
+  const emps = sortByName(state.employees.filter(e=>(state.mcLeave||[]).some(l=>l.employeeId===e.id)));
+  if(!emps.length){ wrap.innerHTML = `<div class="empty-state">Wala pang naka-enroll. Pindutin ang "+ Add Employee to MC Leave", o i-type ang MCW sa Remarks ng Time Sheet.</div>`; return; }
+  wrap.innerHTML = `<table><thead><tr><th>Employee</th><th class="num">Entitled</th><th class="num">Used</th><th class="num">Balance</th><th>Dates Used</th><th class="no-print"></th></tr></thead><tbody>
+  ${emps.map(emp=>{
+    const i = mcLeaveInfoForEmployee(emp.id);
+    return `<tr><td>${esc(displayNameLFM(emp))}${i.reason ? `<div class="muted" style="font-size:11px;">${esc(i.reason)}</div>` : ''}</td><td class="num">${i.entitled}</td><td class="num">${i.used}</td><td class="num" style="font-weight:700;${i.balance<0?'color:#b42318;':''}">${i.balance}</td><td class="muted" style="white-space:normal;">${esc(i.dates)}</td><td class="no-print"><button class="btn btn-sm" onclick="editMcLeavePrompt('${emp.id}')">Edit</button> <button class="btn btn-sm" onclick="removeMcLeave('${emp.id}')" title="Tanggalin sa MC Leave tracker">✕</button></td></tr>`;
+  }).join('')}
+  </tbody></table>`;
+}
+function addMcLeaveModal(){
+  const emps = sortByName(activeEmployees());
+  const body = `<div class="form-grid cols3">
+    <div class="field"><label>Employee</label><select id="mc_emp">${emps.map(e=>`<option value="${e.id}">${esc(displayNameLFM(e))}</option>`).join('')}</select></div>
+    <div class="field"><label>Entitled (days)</label><input id="mc_entitled" type="number" value="60"></div>
+    <div class="field" style="grid-column:1/-1;"><label>Reason / reference (optional)</label><input id="mc_reason" value="Magna Carta of Women (RA 9710) special leave" placeholder="e.g. Gynecological surgery — medical certificate on file"></div>
+  </div>
+  <div class="helpbox" style="margin-top:12px;">Hindi ito kasama sa 5-day Incentive Leave. Para i-log ang bawat araw: sa Time Sheet, i-type ang <b>MCW</b> sa Remarks. Babayaran ito ng araw × daily rate sa column na "Magna Carta Leave (Days)".</div>`;
+  openModal("Add Employee to Magna Carta Leave", body, `<button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="saveMcLeaveGrant()">Save</button>`);
+}
+function saveMcLeaveGrant(){
+  const empId = document.getElementById('mc_emp').value;
+  if(!Array.isArray(state.mcLeave)) state.mcLeave = [];
+  if(state.mcLeave.some(l=>l.employeeId===empId)){ alert("Naka-enroll na ang empleyadong ito. Gamitin ang Edit."); return; }
+  state.mcLeave.push({ id: uid('mc'), employeeId: empId, entitled: num(document.getElementById('mc_entitled').value), used: 0, note: '', reason: document.getElementById('mc_reason').value, source: 'grant' });
+  markDirty(); closeModal(); renderMcLeaveTable();
+}
+// Edits Entitled / reason / any manually-recorded used days. Days logged from the Time Sheet (MCW) are left alone
+// so toggling a Remarks cell later still adds/removes the right amount.
+function editMcLeavePrompt(empId){
+  const emp = empById(empId); if(!emp) return;
+  const recs = (state.mcLeave||[]).filter(l=>l.employeeId===empId);
+  const manual = recs.filter(l=>l.source!=='timesheet');
+  const tsUsed = recs.filter(l=>l.source==='timesheet').reduce((a,r)=>a+num(r.used),0);
+  const entitled = manual.reduce((a,r)=>a+num(r.entitled),0);
+  const manualUsed = manual.reduce((a,r)=>a+num(r.used),0);
+  const note = manual.map(r=>r.note).filter(Boolean).join(' | ');
+  const reason = (recs.find(r=>r.reason)||{}).reason || '';
+  const body = `<div class="form-grid cols3">
+    <div class="field"><label>Entitled (days)</label><input id="mc_edit_entitled" type="number" value="${entitled}"></div>
+    <div class="field"><label>Used before / outside Time Sheet (days)</label><input id="mc_edit_used" type="number" value="${manualUsed}"></div>
+    <div class="field"><label>Used from Time Sheet (MCW)</label><input value="${tsUsed}" disabled></div>
+    <div class="field" style="grid-column:1/-1;"><label>Notes / dates for manually recorded days</label><input id="mc_edit_note" value="${esc(note)}"></div>
+    <div class="field" style="grid-column:1/-1;"><label>Reason / reference</label><input id="mc_edit_reason" value="${esc(reason)}"></div>
+  </div>`;
+  openModal(`Edit Magna Carta Leave — ${esc(emp.name)}`, body, `<button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="saveEditedMcLeave('${empId}')">Save</button>`);
+}
+function saveEditedMcLeave(empId){
+  const keep = (state.mcLeave||[]).filter(l=>!(l.employeeId===empId && l.source!=='timesheet'));
+  keep.push({ id: uid('mc'), employeeId: empId, entitled: num(document.getElementById('mc_edit_entitled').value), used: num(document.getElementById('mc_edit_used').value),
+    note: document.getElementById('mc_edit_note').value, reason: document.getElementById('mc_edit_reason').value, source: 'grant' });
+  state.mcLeave = keep;
+  markDirty(); closeModal(); renderMcLeaveTable();
+}
+function removeMcLeave(empId){
+  const emp = empById(empId); if(!emp) return;
+  if(!confirm(`Tanggalin si ${emp.name} sa Magna Carta Leave tracker? (Hindi nito binabago ang mga payroll run na may Magna Carta Leave (Days) na — ang tracker lang.)`)) return;
+  state.mcLeave = (state.mcLeave||[]).filter(l=>l.employeeId!==empId);
+  markDirty(); renderMcLeaveTable();
 }
 function addLeaveRecordModal(){
   const emps = sortByName(activeEmployees());
@@ -4413,7 +4554,7 @@ function computeAnnualTotals(year, month){
       const liveEmp = state.employees.find(e => normalizeNameForMatch(e.name) === normalizeNameForMatch(r.name));
       return {
         fivejsCommission:0, licCommission:0, productionCommission:0, otherCommission:0,
-        holidayDays:0, incentiveLeave:0, adjustment:0, sss:0, philhealth:0, pagibig:0,
+        holidayDays:0, incentiveLeave:0, mcLeave:0, adjustment:0, sss:0, philhealth:0, pagibig:0,
         ...r,
         lfm: liveEmp ? displayNameLFM(liveEmp) : r.name,
         surnameKey: liveEmp ? surnameKeyForEmp(liveEmp) : getSurname(r.name)
@@ -4425,7 +4566,7 @@ function computeAnnualTotals(year, month){
     if(!totals[emp.id]) totals[emp.id] = { name: emp.name, lfm:displayNameLFM(emp), surnameKey:surnameKeyForEmp(emp),
       basicSalary:0, restDayPay:0, otPay:0, holidayDays:0, holidayPay:0,
       fivejsCommission:0, licCommission:0, productionCommission:0, otherCommission:0,
-      thirteenthMonth:0, allowance:0, incentiveLeave:0, adjustment:0,
+      thirteenthMonth:0, allowance:0, incentiveLeave:0, mcLeave:0, adjustment:0,
       sss:0, philhealth:0, pagibig:0 };
     return totals[emp.id];
   };
@@ -4444,7 +4585,7 @@ function computeAnnualTotals(year, month){
       t.otPay += c.otPay;
       t.holidayDays += num(en.holidayDays); t.holidayPay += c.holidayPay;
       t.thirteenthMonth += num(en.thirteenthMonth); t.allowance += c.allowance;
-      t.incentiveLeave += c.incentiveLeavePay; t.adjustment += num(en.adjustment);
+      t.incentiveLeave += c.incentiveLeavePay; t.mcLeave += c.mcLeavePay; t.adjustment += num(en.adjustment);
       t.sss += c.sss; t.philhealth += c.philhealth; t.pagibig += c.pagibig;
     });
   });
@@ -4492,19 +4633,19 @@ function renderAnnualTable(){
     <th>Employee</th><th class="num">Basic Salary</th><th class="num">Rest Day Pay</th><th class="num">OT Pay</th>
     <th class="num">Holiday Pay</th><th class="num">5JS Commission</th><th class="num">LIC Commission</th>
     <th class="num">Production Commission</th><th class="num">Other Commission</th><th class="num">13th Month</th>
-    <th class="num">Allowance</th><th class="num">Incentive Leave</th><th class="num">Adjustment</th>
+    <th class="num">Allowance</th><th class="num">Incentive Leave</th><th class="num">Magna Carta Leave</th><th class="num">Adjustment</th>
     <th class="num">SSS</th><th class="num">PhilHealth</th><th class="num">Pag-IBIG</th>
   </tr></thead><tbody>
   ${rows.map(r=>`<tr><td>${esc(r.lfm)}</td><td class="num">${peso(r.basicSalary)}</td><td class="num">${peso(r.restDayPay)}</td><td class="num">${peso(r.otPay)}</td>
     <td class="num">${peso(r.holidayPay)}</td><td class="num">${peso(r.fivejsCommission)}</td><td class="num">${peso(r.licCommission)}</td>
     <td class="num">${peso(r.productionCommission)}</td><td class="num">${peso(r.otherCommission)}</td><td class="num">${peso(r.thirteenthMonth)}</td>
-    <td class="num">${peso(r.allowance)}</td><td class="num">${peso(r.incentiveLeave)}</td><td class="num">${peso(r.adjustment)}</td>
+    <td class="num">${peso(r.allowance)}</td><td class="num">${peso(r.incentiveLeave)}</td><td class="num">${peso(r.mcLeave)}</td><td class="num">${peso(r.adjustment)}</td>
     <td class="num">${peso(r.sss)}</td><td class="num">${peso(r.philhealth)}</td><td class="num">${peso(r.pagibig)}</td></tr>`).join('')}
   </tbody><tfoot><tr style="font-weight:700;background:#fafbfc;">
     <td>GRAND TOTAL</td><td class="num">${peso(sum('basicSalary'))}</td><td class="num">${peso(sum('restDayPay'))}</td><td class="num">${peso(sum('otPay'))}</td>
     <td class="num">${peso(sum('holidayPay'))}</td><td class="num">${peso(sum('fivejsCommission'))}</td><td class="num">${peso(sum('licCommission'))}</td>
     <td class="num">${peso(sum('productionCommission'))}</td><td class="num">${peso(sum('otherCommission'))}</td><td class="num">${peso(sum('thirteenthMonth'))}</td>
-    <td class="num">${peso(sum('allowance'))}</td><td class="num">${peso(sum('incentiveLeave'))}</td><td class="num">${peso(sum('adjustment'))}</td>
+    <td class="num">${peso(sum('allowance'))}</td><td class="num">${peso(sum('incentiveLeave'))}</td><td class="num">${peso(sum('mcLeave'))}</td><td class="num">${peso(sum('adjustment'))}</td>
     <td class="num">${peso(sum('sss'))}</td><td class="num">${peso(sum('philhealth'))}</td><td class="num">${peso(sum('pagibig'))}</td>
   </tr></tfoot></table>
   ${rows.length===0?'<div class="empty-state">No payroll data for this year yet.</div>':''}`;
@@ -4516,10 +4657,10 @@ function exportAnnualReportCSV(){
   const month = isHistorical ? 0 : (Number(monthSel.value) || 0);
   const rows = computeAnnualTotals(year, month);
   const header = ['Name','Basic Salary','Rest Day Pay','OT Pay','Holiday Pay','5JS Commission','LIC Commission',
-    'Production Commission','Other Commission','13th Month','Allowance','Incentive Leave','Adjustment','SSS','PhilHealth','Pag-IBIG'];
+    'Production Commission','Other Commission','13th Month','Allowance','Incentive Leave','Magna Carta Leave','Adjustment','SSS','PhilHealth','Pag-IBIG'];
   const dataRows = rows.map(r => [r.lfm, r.basicSalary.toFixed(2), r.restDayPay.toFixed(2), r.otPay.toFixed(2), r.holidayPay.toFixed(2),
     r.fivejsCommission.toFixed(2), r.licCommission.toFixed(2), r.productionCommission.toFixed(2), r.otherCommission.toFixed(2),
-    r.thirteenthMonth.toFixed(2), r.allowance.toFixed(2), r.incentiveLeave.toFixed(2), r.adjustment.toFixed(2),
+    r.thirteenthMonth.toFixed(2), r.allowance.toFixed(2), r.incentiveLeave.toFixed(2), r.mcLeave.toFixed(2), r.adjustment.toFixed(2),
     r.sss.toFixed(2), r.philhealth.toFixed(2), r.pagibig.toFixed(2)]);
   const label = month ? `${ANNUAL_MONTH_NAMES[month-1]}_${year}` : `${year}`;
   exportRowsToCSV(`Annual_Report_${label}.csv`, header, dataRows);
