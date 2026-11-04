@@ -2239,8 +2239,9 @@ function computeDayHours(day, schedFromMin, schedToMin, isOverride){
   const isRestDay = isRestDayDate(day.date);
   const tIn = timeToMinutes(day.timeIn), tOut = timeToMinutes(day.timeOut);
   if(tIn===null || tOut===null) return {hoursWorked:0, lateMinutes:0, otMinutes:0, undertimeMinutes:0, isRestDay};
+  let autoHalfDayPm = false; // the app's own automatic 1–5 PM half-day shift (NOT a schedule someone typed in)
   if(!isRestDay && !isOverride && tIn>=NOON_MINUTES){
-    schedFromMin = HALF_DAY_PM_FROM_MIN; schedToMin = HALF_DAY_PM_TO_MIN; isOverride = true;
+    schedFromMin = HALF_DAY_PM_FROM_MIN; schedToMin = HALF_DAY_PM_TO_MIN; isOverride = true; autoHalfDayPm = true;
   }
   const isLate = (!isRestDay && schedFromMin!==null && tIn>schedFromMin);
   const lateMinutes = isLate ? (tIn-schedFromMin) : 0;
@@ -2250,7 +2251,11 @@ function computeDayHours(day, schedFromMin, schedToMin, isOverride){
   // not it earns Early OT above) never pulls extra minutes into regular Hours Worked.
   const effectiveTimeIn = (earlyMinutes > 0 && schedFromMin!==null) ? schedFromMin : tIn;
   let raw = tOut - effectiveTimeIn; if(raw<0) raw = 0;
-  const isFullDay = raw > HALF_DAY_RAW_THRESHOLD_MINUTES;
+  // Half day in the MORNING: clocked out by 1:00 PM (i.e. never came back for the afternoon session — leaving at
+  // noon or during the lunch hour). It's a half day even if the in-to-out span is over 5 hours (e.g. 6:48 AM–12:49 PM),
+  // mirroring the app's automatic half day for someone who only comes in after noon.
+  const amHalfDay = !isRestDay && !autoHalfDayPm && tOut <= HALF_DAY_PM_FROM_MIN;
+  const isFullDay = raw > HALF_DAY_RAW_THRESHOLD_MINUTES && !amHalfDay;
   const lunch = isFullDay ? FULL_DAY_LUNCH_MINUTES : 0;
   let workedMinutes = Math.max(0, raw-lunch);
   const rawLateSideOt = (!isRestDay && !isLate && schedToMin!==null && tOut>schedToMin) ? (tOut-schedToMin) : 0;
@@ -2267,13 +2272,14 @@ function computeDayHours(day, schedFromMin, schedToMin, isOverride){
     const stdSpan = schedToMin - schedFromMin;
     const stdLunch = (stdSpan > HALF_DAY_RAW_THRESHOLD_MINUTES) ? FULL_DAY_LUNCH_MINUTES : 0;
     const stdWorked = Math.max(0, stdSpan - stdLunch);
-    if(isOverride){
-      // A per-day Sched In/Out override IS that day's whole intended shift (e.g. a swing-shift
-      // block) — it's never "half of a normal day" needing further halving, no matter how short
-      // the override window is. Same full-credit policy as a normal full day: showing up for the
-      // override shift always credits the full standard hours for that override.
+    if(isOverride && stdSpan <= HALF_DAY_RAW_THRESHOLD_MINUTES){
+      // A SHORT per-day Sched In/Out override (a half-day-length window such as 1:00–5:00 PM, or the app's own
+      // automatic PM half-day) IS that day's whole intended shift — it's never "half of a normal day" needing
+      // further halving. Showing up for it credits the full hours of that window.
       workedMinutes = stdWorked;
     } else {
+      // A normal day, OR a full-length custom shift (e.g. 7:00 AM–4:00 PM typed in as that day's Sched In/Out):
+      // same rule as any full day — leaving early on it is Undertime (below), not a free full credit.
       workedMinutes = isFullDay ? stdWorked : Math.min(workedMinutes, stdWorked/2);
     }
   }
@@ -2283,7 +2289,7 @@ function computeDayHours(day, schedFromMin, schedToMin, isOverride){
   // "early" relative to a full day's hours doesn't apply). Independent of Late — someone can be both
   // late AND leave early on the same day, and both get their own deduction, per DOLE's "actual time
   // not rendered" principle (no offsetting one against the other or against OT on a different day).
-  const undertimeMinutes = (!isRestDay && !isOverride && isFullDay && schedToMin!==null && tOut<schedToMin) ? (schedToMin-tOut) : 0;
+  const undertimeMinutes = (!isRestDay && !autoHalfDayPm && isFullDay && schedToMin!==null && tOut<schedToMin) ? (schedToMin-tOut) : 0;
   return {hoursWorked, lateMinutes, otMinutes, undertimeMinutes, isRestDay};
 }
 function ensureTimesheet(en, run, emp){
