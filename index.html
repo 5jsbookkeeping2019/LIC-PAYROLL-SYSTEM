@@ -4661,6 +4661,7 @@ function renderAnnualReport(root){
     <div class="flexrow no-print">
       <select id="ann_year">${(years.length?years:[year]).map(y=>`<option value="${y}">${y}</option>`).join('')}</select>
       <select id="ann_month"><option value="0">All Months</option>${ANNUAL_MONTH_NAMES.map((m,i)=>`<option value="${i+1}">${m}</option>`).join('')}</select>
+      <select id="ann_emp" title="Piliin ang isang empleyado para makita ang annual report niya lang"><option value="all">All Employees</option>${sortByName(state.employees).map(e=>`<option value="${e.id}">${esc(displayNameLFM(e))}${e.active===false?' (inactive)':''}</option>`).join('')}</select>
       <button class="btn" onclick="exportAnnualReportCSV()">⬇ Download Excel</button>
       <button class="btn" onclick="printReport()">🖨 Download PDF</button>
     </div>
@@ -4668,6 +4669,7 @@ function renderAnnualReport(root){
   <div id="annWrap" class="table-wrap"></div></div></div>`;
   document.getElementById('ann_year').addEventListener('change', renderAnnualTable);
   document.getElementById('ann_month').addEventListener('change', renderAnnualTable);
+  document.getElementById('ann_emp').addEventListener('change', renderAnnualTable);
   renderAnnualTable();
 }
 function computeAnnualTotals(year, month){
@@ -4698,7 +4700,7 @@ function computeAnnualTotals(year, month){
   }
   const totals = {};
   const ensure = (emp) => {
-    if(!totals[emp.id]) totals[emp.id] = { name: emp.name, lfm:displayNameLFM(emp), surnameKey:surnameKeyForEmp(emp),
+    if(!totals[emp.id]) totals[emp.id] = { empId: emp.id, name: emp.name, lfm:displayNameLFM(emp), surnameKey:surnameKeyForEmp(emp),
       basicSalary:0, restDayPay:0, otPay:0, holidayDays:0, holidayPay:0,
       fivejsCommission:0, licCommission:0, productionCommission:0, otherCommission:0,
       thirteenthMonth:0, allowance:0, incentiveLeave:0, mcLeave:0, adjustment:0,
@@ -4749,6 +4751,15 @@ function computeAnnualTotals(year, month){
   });
   return Object.values(totals).sort((a,b)=> a.surnameKey.localeCompare(b.surnameKey) || a.name.localeCompare(b.name));
 }
+// Narrows Annual Report rows to the one employee picked in the Employee filter ('all' = everyone). Live rows carry
+// empId; the historical (2024/2025) rows only have a name, so those are matched by normalised name instead.
+function annualFilterRows(rows){
+  const sel = document.getElementById('ann_emp') ? document.getElementById('ann_emp').value : 'all';
+  if(!sel || sel === 'all') return rows;
+  const emp = empById(sel);
+  const nm = emp ? normalizeNameForMatch(emp.name) : null;
+  return rows.filter(r => r.empId === sel || (nm && normalizeNameForMatch(r.name) === nm));
+}
 function renderAnnualTable(){
   const wrap = document.getElementById('annWrap'); if(!wrap) return;
   const year = Number(document.getElementById('ann_year').value);
@@ -4760,7 +4771,7 @@ function renderAnnualTable(){
   monthSel.disabled = isHistorical;
   if(isHistorical) monthSel.value = '0';
   const month = Number(monthSel.value) || 0;
-  const rows = computeAnnualTotals(year, month);
+  const rows = annualFilterRows(computeAnnualTotals(year, month));
   const sum = (k) => rows.reduce((a,r)=>a+r[k],0);
   wrap.innerHTML = `
   ${isHistorical ? `<div class="helpbox">${year} is shown exactly as recorded in the company's payroll records for that year (before this system tracked every pay period in detail) — commission/incentive-leave/adjustment breakdowns weren't part of that historical record, so those columns show ₱0/blank here. There's no month-by-month breakdown behind this total, so the month filter is unavailable for this year.</div>` : ''}
@@ -4783,21 +4794,23 @@ function renderAnnualTable(){
     <td class="num">${peso(sum('allowance'))}</td><td class="num">${peso(sum('incentiveLeave'))}</td><td class="num">${peso(sum('mcLeave'))}</td><td class="num">${peso(sum('adjustment'))}</td>
     <td class="num">${peso(sum('sss'))}</td><td class="num">${peso(sum('philhealth'))}</td><td class="num">${peso(sum('pagibig'))}</td>
   </tr></tfoot></table>
-  ${rows.length===0?'<div class="empty-state">No payroll data for this year yet.</div>':''}`;
+  ${rows.length===0?`<div class="empty-state">${(document.getElementById('ann_emp')&&document.getElementById('ann_emp').value!=='all') ? 'Walang payroll data ang empleyadong ito sa napiling taon/buwan.' : 'No payroll data for this year yet.'}</div>`:''}`;
 }
 function exportAnnualReportCSV(){
   const year = Number(document.getElementById('ann_year').value);
   const monthSel = document.getElementById('ann_month');
   const isHistorical = !!(state.historicalAnnualTotals && state.historicalAnnualTotals[year]);
   const month = isHistorical ? 0 : (Number(monthSel.value) || 0);
-  const rows = computeAnnualTotals(year, month);
+  const rows = annualFilterRows(computeAnnualTotals(year, month));
   const header = ['Name','Basic Salary','Rest Day Pay','OT Pay','Holiday Pay','5JS Commission','LIC Commission',
     'Production Commission','Other Commission','13th Month','Allowance','Incentive Leave','Magna Carta Leave','Adjustment','SSS','PhilHealth','Pag-IBIG'];
   const dataRows = rows.map(r => [r.lfm, r.basicSalary.toFixed(2), r.restDayPay.toFixed(2), r.otPay.toFixed(2), r.holidayPay.toFixed(2),
     r.fivejsCommission.toFixed(2), r.licCommission.toFixed(2), r.productionCommission.toFixed(2), r.otherCommission.toFixed(2),
     r.thirteenthMonth.toFixed(2), r.allowance.toFixed(2), r.incentiveLeave.toFixed(2), r.mcLeave.toFixed(2), r.adjustment.toFixed(2),
     r.sss.toFixed(2), r.philhealth.toFixed(2), r.pagibig.toFixed(2)]);
-  const label = month ? `${ANNUAL_MONTH_NAMES[month-1]}_${year}` : `${year}`;
+  const empSel = document.getElementById('ann_emp') ? document.getElementById('ann_emp').value : 'all';
+  const empTag = (empSel && empSel !== 'all' && empById(empSel)) ? '_' + empById(empSel).name.trim().replace(/\s+/g,'_') : '';
+  const label = (month ? `${ANNUAL_MONTH_NAMES[month-1]}_${year}` : `${year}`) + empTag;
   exportRowsToCSV(`Annual_Report_${label}.csv`, header, dataRows);
 }
 function renderRunSummaryReport(root){
