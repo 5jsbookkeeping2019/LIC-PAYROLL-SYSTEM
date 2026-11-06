@@ -940,7 +940,11 @@ function calcEntry(emp, entry, run){
   // over both when it's set, since it's a deliberate historical correction for that one entry.
   const pendingActive = entry.rateDayOverride == null && emp.pendingRateDay != null && emp.pendingRateEffectiveDate
     && run && run.periodStart && new Date(run.periodStart) >= new Date(emp.pendingRateEffectiveDate);
+  // A former OJT: pay periods that started before their "Regularized on" date (Employee record) were worked as an
+  // OJT, so they use the OJT rate/day on file for them (if one is entered) instead of today's regular rate.
+  const inOjtPhase = !!(emp.thirteenthStart && run && run.periodStart && String(run.periodStart).slice(0,10) < emp.thirteenthStart);
   const rateDay = entry.rateDayOverride != null ? num(entry.rateDayOverride)
+    : (inOjtPhase && num(emp.ojtRateDay) > 0) ? num(emp.ojtRateDay)
     : pendingActive ? num(emp.pendingRateDay) : num(emp.rateDay);
   const hr = rateDay / 8;
   const hoursWorked = num(entry.hoursWorked);
@@ -993,7 +997,7 @@ function calcEntry(emp, entry, run){
   // OJTs are flat-rate-per-day (see isOJT above) — Late/Undertime pesos deductions are skipped for
   // them, but only for runs dated on/after OJT_NO_LATE_UNDERTIME_FROM, so older, already-processed
   // OJT runs keep showing the deduction they were actually paid with, unchanged.
-  const ojtSkipLateUndertime = isOJT(emp) && String(run.payDate||'') >= OJT_NO_LATE_UNDERTIME_FROM;
+  const ojtSkipLateUndertime = (isOJT(emp) || inOjtPhase) && String(run.payDate||'') >= OJT_NO_LATE_UNDERTIME_FROM;
   const lateDeduction = ojtSkipLateUndertime ? 0 : (hr/60) * lateMinutes;
   // Undertime (leaving before Schedule To on a full-day attempt) is its own figure, computed and
   // deducted exactly the same way as Late — see computeDayHours. Kept separate from lateDeduction
@@ -1438,7 +1442,8 @@ function editEmployee(id){
       <option value="auto" ${e.thirteenthExempt===undefined?'selected':''}>Auto (OJT / part-time = not covered)</option>
       <option value="yes" ${e.thirteenthExempt===false?'selected':''}>Covered (regular employee)</option>
       <option value="no" ${e.thirteenthExempt===true?'selected':''}>Not covered</option></select></div>
-    <div class="field"><label>13th Month counts from (optional)</label><input id="f_thirteenthStart" type="date" value="${esc(e.thirteenthStart||'')}" title="Dating OJT / part-time na naging regular: ilagay ang petsa ng regularization. Mga payroll run na nagsimula bago ang petsang ito ay hindi bibilangin sa 13th Month."></div>
+    <div class="field"><label>OJT rate/day (bago ang regularization, optional)</label><input id="f_ojtRateDay" type="number" step="0.01" value="${e.ojtRateDay||''}" placeholder="hal. 100" title="Para sa dating OJT: ang Rate/Day na ginamit noong OJT pa siya. Ginagamit ito sa mga payroll run na nagsimula bago ang 'Regularized on' date, para hindi ang kasalukuyang rate ang ma-compute sa lumang records."></div>
+    <div class="field"><label>Regularized on / 13th Month counts from (optional)</label><input id="f_thirteenthStart" type="date" value="${esc(e.thirteenthStart||'')}" title="Dating OJT / part-time na naging regular: ilagay ang petsa ng regularization. Mga payroll run na nagsimula bago ang petsang ito ay hindi bibilangin sa 13th Month, at lalabas bilang hiwalay na '(OJT days)' na linya sa Annual Report."></div>
     <div class="field" style="grid-column:1/-1;"><label class="checkline"><input type="checkbox" id="f_flexShift" ${e.flexShift===true?'checked':''}> Variable shift (e.g. Liaison — pasok minsan 4am, minsan 8am): walang fixed na Work Schedule, 9 oras mula sa Time In niya bawat araw</label><div class="muted" style="font-size:11px;margin-top:2px;">Hindi siya malalate o magkakaroon ng Undertime hangga't kumpleto ang 9 oras (8 hrs + 1 hr lunch). May Undertime lang kung umuwi bago matapos ang 9 oras; OT kung lumampas ng 1 oras o higit.</div></div>
   </div>
   <div class="helpbox" style="margin-top:6px;">"🧮 Auto-Calc SSS/PhilHealth/Pag-IBIG" (in a payroll run) automatically leaves a deduction at ₱0 for anyone with no number on file for it, and for anyone checked "Don't deduct" above — even if they do have a number.</div>
@@ -1548,6 +1553,7 @@ function saveEmployee(id, isNew){
     flexShift: document.getElementById('f_flexShift').checked,
     thirteenthExempt: ({yes:false, no:true})[document.getElementById('f_thirteenthMode').value],
     thirteenthStart: get('f_thirteenthStart') || '',
+    ojtRateDay: Number(get('f_ojtRateDay')) > 0 ? Number(get('f_ojtRateDay')) : undefined,
     sssExempt: document.getElementById('f_sssExempt').checked,
     philhealthExempt: document.getElementById('f_philhealthExempt').checked,
     pagibigExempt: document.getElementById('f_pagibigExempt').checked,
@@ -4699,13 +4705,18 @@ function computeAnnualTotals(year, month){
     }).sort((a,b)=> a.surnameKey.localeCompare(b.surnameKey) || a.name.localeCompare(b.name));
   }
   const totals = {};
-  const ensure = (emp) => {
-    if(!totals[emp.id]) totals[emp.id] = { empId: emp.id, name: emp.name, lfm:displayNameLFM(emp), surnameKey:surnameKeyForEmp(emp),
+  // An employee with a "Regularized on" date (Employee record → 13th Month counts from) gets TWO lines: their OJT days
+  // (pay periods starting before that date) and their regular record (on/after it). Employees who are still OJT
+  // (no date, department/position OJT) stay one line, labelled OJT.
+  const isOjtPhase = (emp, dateStr) => !!(emp.thirteenthStart && String(dateStr||'').slice(0,10) < emp.thirteenthStart);
+  const ensure = (emp, ojtPhase) => {
+    const key = emp.id + (ojtPhase ? '|ojt' : '');
+    if(!totals[key]) totals[key] = { empId: emp.id, ojtPhase: !!ojtPhase, name: emp.name + (ojtPhase ? ' (OJT days)' : ''), lfm:displayNameLFM(emp) + (ojtPhase ? ' (OJT days)' : ((!emp.thirteenthStart && isOJT(emp)) ? ' (OJT)' : '')), surnameKey:surnameKeyForEmp(emp),
       basicSalary:0, restDayPay:0, otPay:0, holidayDays:0, holidayPay:0,
       fivejsCommission:0, licCommission:0, productionCommission:0, otherCommission:0,
       thirteenthMonth:0, allowance:0, incentiveLeave:0, mcLeave:0, adjustment:0,
       sss:0, philhealth:0, pagibig:0 };
-    return totals[emp.id];
+    return totals[key];
   };
   state.runs.forEach(r=>{
     if(new Date(r.periodEnd).getFullYear() !== year) return;
@@ -4716,7 +4727,7 @@ function computeAnnualTotals(year, month){
     r.entries.forEach(en=>{
       const emp = empById(en.employeeId); if(!emp) return;
       const c = calcEntry(emp, en, r);
-      const t = ensure(emp);
+      const t = ensure(emp, isOjtPhase(emp, r.periodStart));
       t.basicSalary += c.basicSalary;
       t.restDayPay += c.restDayPay;
       t.otPay += c.otPay;
@@ -4742,14 +4753,16 @@ function computeAnnualTotals(year, month){
     if(classifyDate.getFullYear() !== year) return;
     if(month && (classifyDate.getMonth()+1) !== month) return;
     const emp = empById(cm.employeeId); if(!emp) return;
-    const t = ensure(emp);
+    const t = ensure(emp, isOjtPhase(emp, classifyDateStr));
     const type = (cm.type||'').toUpperCase();
     if(type === 'LIC') t.licCommission += num(cm.amount);
     else if(type === '5JS') t.fivejsCommission += num(cm.amount);
     else if(type === 'PRODUCTION') t.productionCommission += num(cm.amount);
     else t.otherCommission += num(cm.amount);
   });
-  return Object.values(totals).sort((a,b)=> a.surnameKey.localeCompare(b.surnameKey) || a.name.localeCompare(b.name));
+  // Someone who has both phases in view: tag the regular line "(Regular)" so the two lines are easy to tell apart.
+  Object.values(totals).forEach(t=>{ if(!t.ojtPhase && totals[t.empId+'|ojt']) t.lfm += ' (Regular)'; });
+  return Object.values(totals).sort((a,b)=> a.surnameKey.localeCompare(b.surnameKey) || String(a.empId).localeCompare(String(b.empId)) || (b.ojtPhase?1:0)-(a.ojtPhase?1:0) || a.name.localeCompare(b.name));
 }
 // Narrows Annual Report rows to the one employee picked in the Employee filter ('all' = everyone). Live rows carry
 // empId; the historical (2024/2025) rows only have a name, so those are matched by normalised name instead.
@@ -4759,6 +4772,42 @@ function annualFilterRows(rows){
   const emp = empById(sel);
   const nm = emp ? normalizeNameForMatch(emp.name) : null;
   return rows.filter(r => r.empId === sel || (nm && normalizeNameForMatch(r.name) === nm));
+}
+// One employee + "All Months": instead of a single yearly line, one row PER MONTH (Jan–Dec) with the same columns,
+// plus a YEAR TOTAL row — so you can see how that person's pay moved through the year.
+const ANNUAL_COLS = [['basicSalary','Basic Salary'],['restDayPay','Rest Day Pay'],['otPay','OT Pay'],['holidayPay','Holiday Pay'],
+  ['fivejsCommission','5JS Commission'],['licCommission','LIC Commission'],['productionCommission','Production Commission'],
+  ['otherCommission','Other Commission'],['thirteenthMonth','13th Month'],['allowance','Allowance'],['incentiveLeave','Incentive Leave'],
+  ['mcLeave','Magna Carta Leave'],['adjustment','Adjustment'],['sss','SSS'],['philhealth','PhilHealth'],['pagibig','Pag-IBIG']];
+function annualMonthlyRows(year){
+  const zero = {}; ANNUAL_COLS.forEach(([k])=>zero[k]=0);
+  const yearRows = annualFilterRows(computeAnnualTotals(year, 0));
+  const split = yearRows.some(r=>r.ojtPhase) && yearRows.some(r=>!r.ojtPhase);
+  const rows = [];
+  ANNUAL_MONTH_NAMES.forEach((name,i)=>{
+    const rs = annualFilterRows(computeAnnualTotals(year, i+1));
+    if(!rs.length){ rows.push({ label: name, r: zero, has: false }); return; }
+    rs.forEach(r=> rows.push({ label: name + (split ? (r.ojtPhase ? ' — OJT' : ' — Regular') : (r.ojtPhase ? ' — OJT' : '')), r, has: true }));
+  });
+  const sumOf = list => { const t = {}; ANNUAL_COLS.forEach(([k])=>t[k]=list.reduce((a,r)=>a+num(r[k]),0)); return t; };
+  const tot = sumOf(yearRows);
+  const subtotals = split ? [{ label:'OJT days subtotal', r: sumOf(yearRows.filter(r=>r.ojtPhase)) }, { label:'Regular subtotal', r: sumOf(yearRows.filter(r=>!r.ojtPhase)) }] : [];
+  return { rows, tot, subtotals };
+}
+function annualMonthlyMode(){
+  const sel = document.getElementById('ann_emp') ? document.getElementById('ann_emp').value : 'all';
+  const year = Number(document.getElementById('ann_year').value);
+  const isHistorical = !!(state.historicalAnnualTotals && state.historicalAnnualTotals[year]);
+  const month = Number(document.getElementById('ann_month').value) || 0;
+  return !!sel && sel !== 'all' && !month && !isHistorical;
+}
+function renderAnnualMonthlyTable(wrap, year){
+  const { rows, tot, subtotals } = annualMonthlyRows(year);
+  const emp = empById(document.getElementById('ann_emp').value);
+  wrap.innerHTML = `<div class="helpbox">${esc(emp ? displayNameLFM(emp) : '')} — ${year}, bawat buwan (isang row kada buwan, kasama ang Total sa baba).</div>
+  <table><thead><tr><th>Month</th>${ANNUAL_COLS.map(([,l])=>`<th class="num">${l}</th>`).join('')}</tr></thead><tbody>
+  ${rows.map(x=>`<tr${x.has?'':' style="color:#9aa3ad;"'}><td>${x.label}</td>${ANNUAL_COLS.map(([k])=>`<td class="num">${peso(x.r[k])}</td>`).join('')}</tr>`).join('')}
+  </tbody><tfoot>${subtotals.map(x=>`<tr style="background:#fafbfc;"><td>${x.label}</td>${ANNUAL_COLS.map(([k])=>`<td class="num">${peso(x.r[k])}</td>`).join('')}</tr>`).join('')}<tr style="font-weight:700;background:#fafbfc;"><td>YEAR TOTAL</td>${ANNUAL_COLS.map(([k])=>`<td class="num">${peso(tot[k])}</td>`).join('')}</tr></tfoot></table>`;
 }
 function renderAnnualTable(){
   const wrap = document.getElementById('annWrap'); if(!wrap) return;
@@ -4771,6 +4820,7 @@ function renderAnnualTable(){
   monthSel.disabled = isHistorical;
   if(isHistorical) monthSel.value = '0';
   const month = Number(monthSel.value) || 0;
+  if(annualMonthlyMode()){ renderAnnualMonthlyTable(wrap, year); return; }
   const rows = annualFilterRows(computeAnnualTotals(year, month));
   const sum = (k) => rows.reduce((a,r)=>a+r[k],0);
   wrap.innerHTML = `
@@ -4801,6 +4851,14 @@ function exportAnnualReportCSV(){
   const monthSel = document.getElementById('ann_month');
   const isHistorical = !!(state.historicalAnnualTotals && state.historicalAnnualTotals[year]);
   const month = isHistorical ? 0 : (Number(monthSel.value) || 0);
+  if(annualMonthlyMode()){
+    const { rows: mrows, tot, subtotals } = annualMonthlyRows(year);
+    const emp = empById(document.getElementById('ann_emp').value);
+    exportRowsToCSV(`Annual_Report_${year}_${emp ? emp.name.trim().replace(/\s+/g,'_') : 'employee'}_by_month.csv`,
+      ['Month', ...ANNUAL_COLS.map(([,l])=>l)],
+      [...mrows.map(x=>[x.label, ...ANNUAL_COLS.map(([k])=>x.r[k].toFixed(2))]), ...subtotals.map(x=>[x.label, ...ANNUAL_COLS.map(([k])=>x.r[k].toFixed(2))]), ['YEAR TOTAL', ...ANNUAL_COLS.map(([k])=>tot[k].toFixed(2))]]);
+    return;
+  }
   const rows = annualFilterRows(computeAnnualTotals(year, month));
   const header = ['Name','Basic Salary','Rest Day Pay','OT Pay','Holiday Pay','5JS Commission','LIC Commission',
     'Production Commission','Other Commission','13th Month','Allowance','Incentive Leave','Magna Carta Leave','Adjustment','SSS','PhilHealth','Pag-IBIG'];
