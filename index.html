@@ -1434,6 +1434,11 @@ function editEmployee(id){
     <div class="field"><label>GCash No. / Bank Acct.</label><input id="f_gcashNo" value="${esc(e.gcashNo||e.bankAcct||'')}"></div>
     <div class="field"><label>Work Schedule From</label><input id="f_schedFrom" type="time" value="${esc(e.schedFrom||'08:00')}"></div>
     <div class="field"><label>Work Schedule To</label><input id="f_schedTo" type="time" value="${esc(e.schedTo||'17:00')}"></div>
+    <div class="field"><label>13th Month coverage</label><select id="f_thirteenthMode">
+      <option value="auto" ${e.thirteenthExempt===undefined?'selected':''}>Auto (OJT / part-time = not covered)</option>
+      <option value="yes" ${e.thirteenthExempt===false?'selected':''}>Covered (regular employee)</option>
+      <option value="no" ${e.thirteenthExempt===true?'selected':''}>Not covered</option></select></div>
+    <div class="field"><label>13th Month counts from (optional)</label><input id="f_thirteenthStart" type="date" value="${esc(e.thirteenthStart||'')}" title="Dating OJT / part-time na naging regular: ilagay ang petsa ng regularization. Mga payroll run na nagsimula bago ang petsang ito ay hindi bibilangin sa 13th Month."></div>
     <div class="field" style="grid-column:1/-1;"><label class="checkline"><input type="checkbox" id="f_flexShift" ${e.flexShift===true?'checked':''}> Variable shift (e.g. Liaison — pasok minsan 4am, minsan 8am): walang fixed na Work Schedule, 9 oras mula sa Time In niya bawat araw</label><div class="muted" style="font-size:11px;margin-top:2px;">Hindi siya malalate o magkakaroon ng Undertime hangga't kumpleto ang 9 oras (8 hrs + 1 hr lunch). May Undertime lang kung umuwi bago matapos ang 9 oras; OT kung lumampas ng 1 oras o higit.</div></div>
   </div>
   <div class="helpbox" style="margin-top:6px;">"🧮 Auto-Calc SSS/PhilHealth/Pag-IBIG" (in a payroll run) automatically leaves a deduction at ₱0 for anyone with no number on file for it, and for anyone checked "Don't deduct" above — even if they do have a number.</div>
@@ -1541,6 +1546,8 @@ function saveEmployee(id, isNew){
     bankName: get('f_paymentMethod')==='bank' ? get('f_bankName') : '',
     schedFrom: get('f_schedFrom') || '08:00', schedTo: get('f_schedTo') || '17:00',
     flexShift: document.getElementById('f_flexShift').checked,
+    thirteenthExempt: ({yes:false, no:true})[document.getElementById('f_thirteenthMode').value],
+    thirteenthStart: get('f_thirteenthStart') || '',
     sssExempt: document.getElementById('f_sssExempt').checked,
     philhealthExempt: document.getElementById('f_philhealthExempt').checked,
     pagibigExempt: document.getElementById('f_pagibigExempt').checked,
@@ -4324,17 +4331,33 @@ function thirteenthMonths(year){
 // One row per employee: basic salary per month of the window, total, 13th month (total / 12), how
 // much earlier paydays already paid, and the balance. beforePayDate (optional) limits "already paid"
 // to paydays strictly before it — used when working out one specific payday's installment.
+// OJTs and part-timers are NOT covered by the 13th Month. Detected automatically (department/position "OJT", or
+// "part-time / part-timer / partimer" in the position or department), but the Employee record can override it
+// either way (thirteenthExempt: true = not covered, false = covered even though it looks like OJT/part-time).
+function isPartTimer(emp){
+  const txt = String((emp && emp.position)||'') + ' ' + String((emp && emp.department)||'');
+  return /part[\s\-]*t?imer|part[\s\-]*time/i.test(txt);
+}
+function isThirteenthExempt(emp){
+  if(!emp) return true;
+  if(emp.thirteenthExempt === true) return true;
+  if(emp.thirteenthExempt === false) return false;
+  return isOJT(emp) || isPartTimer(emp);
+}
 function computeThirteenthRows(year, beforePayDate){
   const months = thirteenthMonths(year);
   const keys = new Set(months.map(m=>m.key));
   const rows = [];
   sortByName(state.employees).forEach(emp=>{
+    if(isThirteenthExempt(emp)) return;
     const perMonth = {}; months.forEach(m=>perMonth[m.key]=0);
     let given = 0;
     state.runs.forEach(r=>{
       const en = r.entries.find(e=>e.employeeId===emp.id); if(!en) return;
       const k = String(r.periodStart||'').slice(0,7);
-      if(keys.has(k)) perMonth[k] += calcEntry(emp, en, r).basicSalary;
+      // 13th Month counts only from the date the employee became eligible (e.g. a former OJT's regularization date).
+      const beforeStart = emp.thirteenthStart && String(r.periodStart||'') < emp.thirteenthStart;
+      if(keys.has(k) && !beforeStart) perMonth[k] += calcEntry(emp, en, r).basicSalary;
       const pd = String(r.payDate||'');
       if(pd >= `${year}-09-01` && pd <= `${year}-12-31` && (!beforePayDate || pd < beforePayDate)) given += num(en.thirteenthMonth);
     });
@@ -4416,27 +4439,74 @@ function updThirteenthPlan(field, val){
   markDirty();
   const c = document.getElementById('content'); if(c) renderReports(c);
 }
+let thirteenthFilter = { q:'', batch:'all', status:'all' };
+function thirteenthFilteredRows(){
+  const plan = getThirteenthPlan();
+  const q = thirteenthFilter.q.trim().toLowerCase();
+  return computeThirteenthRows(plan.year).filter(r=>{
+    if(q && !(String(r.emp.name||'').toLowerCase().includes(q) || displayNameLFM(r.emp).toLowerCase().includes(q))) return false;
+    const b = (plan.batches||{})[r.empId] || '';
+    if(thirteenthFilter.batch === 'none' && b) return false;
+    if(thirteenthFilter.batch !== 'all' && thirteenthFilter.batch !== 'none' && b !== thirteenthFilter.batch) return false;
+    if(thirteenthFilter.status === 'active' && r.emp.active === false) return false;
+    if(thirteenthFilter.status === 'inactive' && r.emp.active !== false) return false;
+    return true;
+  });
+}
+function setThirteenthFilter(field, val){
+  thirteenthFilter[field] = val;
+  render13thTable();
+}
 function render13thMonthReport(root){
-  const plan = getThirteenthPlan(), sched = thirteenthSchedule(plan), months = thirteenthMonths(plan.year);
-  const rows = computeThirteenthRows(plan.year);
-  const sum = f => rows.reduce((a,r)=>a+f(r),0);
+  const plan = getThirteenthPlan(), sched = thirteenthSchedule(plan);
   const yearOpts = []; for(let y=new Date().getFullYear()-2; y<=new Date().getFullYear()+1; y++) yearOpts.push(y);
   root.innerHTML = `<div class="section"><div class="section-head">
-    <div><h3>13th Month Pay</h3><div class="desc">Basic Salary only (Hours Worked × Hourly Rate — no allowance, OT, holiday, commission or adjustments), December ${plan.year-1} to November ${plan.year}, added up and divided by 12. Employees are paid by <b>batch</b> — each one on just one payday (pick it in the Batch column): ${sched.map(fmtDate).join(', ')}. The final payday (${fmtDate(sched[sched.length-1])}) pays everyone's remaining balance, including the Oct/Nov basic salary that wasn't in yet. Open each of those payroll runs and click <b>🎄 Apply 13th Month</b>.</div></div>
+    <div><h3>13th Month Pay</h3><div class="desc">Basic Salary only (Hours Worked × Hourly Rate — no allowance, OT, holiday, commission or adjustments), December ${plan.year-1} to November ${plan.year}, added up and divided by 12. <b>OJTs and part-timers are not covered.</b> Employees are paid by <b>batch</b> — each one on just one payday (pick it in the Batch column): ${sched.map(fmtDate).join(', ')}. The final payday (${fmtDate(sched[sched.length-1])}) pays everyone's remaining balance, including the Oct/Nov basic salary that wasn't in yet. Open each of those payroll runs and click <b>🎄 Apply 13th Month</b>.</div></div>
     <div class="flexrow no-print">
       <label style="font-size:12px;">Year <select onchange="updThirteenthPlan('year',this.value)">${yearOpts.map(y=>`<option value="${y}" ${y===plan.year?'selected':''}>${y}</option>`).join('')}</select></label>
       <label style="font-size:12px;">First payday <input type="date" value="${plan.firstPayDate}" onchange="updThirteenthPlan('firstPayDate',this.value)"></label>
       <label style="font-size:12px;"># of paydays <input type="number" min="1" max="12" step="1" value="${plan.installments}" style="width:60px;" onchange="updThirteenthPlan('installments',this.value)"></label>
       <button class="btn" onclick="autoAssignThirteenthBatches()" title="Splits employees evenly across the paydays, alphabetically — then adjust any one in the Batch column">Auto-Assign Batches</button>
-      <button class="btn" onclick="export13thMonthCSV()">⬇ Download Excel</button>
+      <button class="btn" onclick="export13thMonthCSV()" title="Downloads what the current filter is showing">⬇ Download Excel</button>
       <button class="btn" onclick="printReport()">🖨 Download PDF</button></div>
-  </div><div class="section-body"><div class="table-wrap" id="thirteenthWrap"><table><thead><tr><th>Employee</th><th>Batch (Payday)</th>${months.map(m=>`<th class="num">${m.label}</th>`).join('')}<th class="num">Total</th><th class="num">13th Month (÷12)</th><th class="num" title="Total of the 13th Month amounts currently filled in on payroll runs (Sep–Dec pay dates) — not just planned">Paid So Far</th><th class="num">Balance</th></tr></thead><tbody>
-  ${rows.map(r=>`<tr><td>${esc(displayNameLFM(r.emp))}${r.emp.active===false?' <span class="muted">(inactive)</span>':''}</td><td><select onchange="updThirteenthBatch('${r.empId}',this.value)"><option value="">— not assigned —</option>${sched.map((d,i)=>`<option value="${d}" ${plan.batches[r.empId]===d?'selected':''}>${fmtDate(d)}${i===sched.length-1?' (balance for all)':''}</option>`).join('')}</select></td>${months.map(m=>`<td class="num">${r.perMonth[m.key] ? peso(r.perMonth[m.key]) : '—'}</td>`).join('')}<td class="num">${peso(r.total)}</td><td class="num" style="font-weight:600;">${peso(r.thirteenth)}</td><td class="num">${peso(r.given)}</td><td class="num">${peso(r.balance)}</td></tr>`).join('')}
-  </tbody><tfoot><tr style="font-weight:700;background:#fafbfc;"><td>TOTAL</td><td></td>${months.map(m=>`<td class="num">${peso(sum(r=>r.perMonth[m.key]))}</td>`).join('')}<td class="num">${peso(sum(r=>r.total))}</td><td class="num">${peso(sum(r=>r.thirteenth))}</td><td class="num">${peso(sum(r=>r.given))}</td><td class="num">${peso(sum(r=>r.balance))}</td></tr></tfoot></table></div>
-  ${rows.length===0?'<div class="empty-state">No basic salary found in this December–November window.</div>':''}</div></div>`;
+  </div><div class="section-body">
+    <div class="flexrow no-print" style="margin-bottom:10px;align-items:center;">
+      <input type="search" id="th_q" placeholder="🔎 Search employee…" value="${esc(thirteenthFilter.q)}" oninput="setThirteenthFilter('q',this.value)" style="min-width:200px;">
+      <label style="font-size:12px;">Batch <select onchange="setThirteenthFilter('batch',this.value)">
+        <option value="all" ${thirteenthFilter.batch==='all'?'selected':''}>All</option>
+        ${sched.map((d,i)=>`<option value="${d}" ${thirteenthFilter.batch===d?'selected':''}>${fmtDate(d)}${i===sched.length-1?' (balance for all)':''}</option>`).join('')}
+        <option value="none" ${thirteenthFilter.batch==='none'?'selected':''}>— not assigned —</option></select></label>
+      <label style="font-size:12px;">Status <select onchange="setThirteenthFilter('status',this.value)">
+        <option value="all" ${thirteenthFilter.status==='all'?'selected':''}>All</option>
+        <option value="active" ${thirteenthFilter.status==='active'?'selected':''}>Active</option>
+        <option value="inactive" ${thirteenthFilter.status==='inactive'?'selected':''}>Inactive</option></select></label>
+      <span class="muted" id="th_count" style="font-size:12px;"></span>
+    </div>
+    <div class="table-wrap" id="thirteenthWrap"></div>
+    <div class="muted" id="th_excluded" style="font-size:11.5px;margin-top:8px;"></div>
+  </div></div>`;
+  render13thTable();
+}
+function render13thTable(){
+  const wrap = document.getElementById('thirteenthWrap'); if(!wrap) return;
+  const plan = getThirteenthPlan(), sched = thirteenthSchedule(plan), months = thirteenthMonths(plan.year);
+  const all = computeThirteenthRows(plan.year);
+  const rows = thirteenthFilteredRows();
+  const sum = f => rows.reduce((a,r)=>a+f(r),0);
+  wrap.innerHTML = `<table><thead><tr><th>Employee</th><th>Batch (Payday)</th>${months.map(m=>`<th class="num">${m.label}</th>`).join('')}<th class="num">Total</th><th class="num">13th Month (÷12)</th><th class="num" title="Total of the 13th Month amounts currently filled in on payroll runs (Sep–Dec pay dates) — not just planned">Paid So Far</th><th class="num">Balance</th></tr></thead><tbody>
+  ${rows.map(r=>`<tr><td>${esc(displayNameLFM(r.emp))}${r.emp.active===false?' <span class="muted">(inactive)</span>':''}${r.emp.thirteenthStart?` <span class="muted" style="font-size:10.5px;" title="13th Month counts only runs starting on/after this date">(from ${fmtDate(r.emp.thirteenthStart)})</span>`:''}</td><td><select onchange="updThirteenthBatch('${r.empId}',this.value)"><option value="">— not assigned —</option>${sched.map((d,i)=>`<option value="${d}" ${plan.batches[r.empId]===d?'selected':''}>${fmtDate(d)}${i===sched.length-1?' (balance for all)':''}</option>`).join('')}</select></td>${months.map(m=>`<td class="num">${r.perMonth[m.key] ? peso(r.perMonth[m.key]) : '—'}</td>`).join('')}<td class="num">${peso(r.total)}</td><td class="num" style="font-weight:600;">${peso(r.thirteenth)}</td><td class="num">${peso(r.given)}</td><td class="num">${peso(r.balance)}</td></tr>`).join('')}
+  </tbody><tfoot><tr style="font-weight:700;background:#fafbfc;"><td>TOTAL</td><td></td>${months.map(m=>`<td class="num">${peso(sum(r=>r.perMonth[m.key]))}</td>`).join('')}<td class="num">${peso(sum(r=>r.total))}</td><td class="num">${peso(sum(r=>r.thirteenth))}</td><td class="num">${peso(sum(r=>r.given))}</td><td class="num">${peso(sum(r=>r.balance))}</td></tr></tfoot></table>
+  ${rows.length===0?'<div class="empty-state">No employees match this filter (or no basic salary in this December–November window).</div>':''}`;
+  const cnt = document.getElementById('th_count');
+  if(cnt) cnt.textContent = `Showing ${rows.length} of ${all.length}`;
+  const ex = document.getElementById('th_excluded');
+  if(ex){
+    const skipped = sortByName(state.employees).filter(e=>isThirteenthExempt(e) && state.runs.some(r=>r.entries.some(x=>x.employeeId===e.id)));
+    ex.textContent = skipped.length ? `Hindi kasali (OJT / part-time / marked "Not covered"): ${skipped.map(e=>displayNameLFM(e)).join(' · ')}` : '';
+  }
 }
 function export13thMonthCSV(){
-  const plan = getThirteenthPlan(), months = thirteenthMonths(plan.year), rows = computeThirteenthRows(plan.year);
+  const plan = getThirteenthPlan(), months = thirteenthMonths(plan.year), rows = thirteenthFilteredRows();
   exportRowsToCSV(`13th_Month_${plan.year}.csv`,
     ['Employee', 'Batch (Payday)', ...months.map(m=>m.label), 'Total', '13th Month (÷12)', 'Paid So Far', 'Balance'],
     rows.map(r=>[displayNameLFM(r.emp), plan.batches[r.empId]||'', ...months.map(m=>r.perMonth[m.key].toFixed(2)), r.total.toFixed(2), r.thirteenth.toFixed(2), r.given.toFixed(2), r.balance.toFixed(2)]));
